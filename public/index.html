@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="th">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Clip Studio</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header>
+    <h1>🎬 Clip Studio</h1>
+    <nav>
+      <button data-tab="create" class="active">สร้างคลิป</button>
+      <button data-tab="skills">สกิล</button>
+      <button data-tab="projects">โปรเจกต์</button>
+      <button data-tab="settings">ตั้งค่า</button>
+    </nav>
+  </header>
+
+  <main>
+    <!-- สร้างคลิป -->
+    <section id="tab-create" class="tab active">
+      <div class="card">
+        <h2>1. เลือกสกิล / สไตล์</h2>
+        <select id="c-skill"></select>
+        <h2>2. บท</h2>
+        <div class="seg">
+          <label><input type="radio" name="mode" value="ai" checked /> ให้ Claude คิดเนื้อเรื่อง</label>
+          <label><input type="radio" name="mode" value="own-ai" /> วางบทเอง (Claude แบ่งฉาก)</label>
+          <label><input type="radio" name="mode" value="own" /> วางบทเอง (ย่อหน้าละฉาก ไม่ใช้ AI)</label>
+        </div>
+        <div id="c-ai">
+          <input id="c-topic" placeholder="หัวข้อ / ไอเดีย เช่น ตำนานผีบ้านร้างริมคลอง" />
+          <div class="row">
+            <label>ความยาว (วินาที) <input id="c-duration" type="number" value="60" min="10" max="600" /></label>
+          </div>
+          <textarea id="c-extra" rows="2" placeholder="เพิ่มเติม (ไม่บังคับ) เช่น กลุ่มเป้าหมาย, ปิดท้ายด้วยคำถาม"></textarea>
+        </div>
+        <textarea id="c-script" rows="10" class="hidden" placeholder="วางบทที่นี่ เว้นบรรทัดว่างระหว่างฉาก"></textarea>
+        <button id="c-go" class="primary">สร้างบท →</button>
+      </div>
+    </section>
+
+    <!-- สกิล -->
+    <section id="tab-skills" class="tab">
+      <div class="card">
+        <h2>อัปโหลดไฟล์สกิล</h2>
+        <p class="muted">.md / .txt (รองรับ SKILL.md ที่มี frontmatter name/description) เลือกได้หลายไฟล์</p>
+        <input type="file" id="s-files" accept=".md,.txt,.markdown" multiple />
+      </div>
+      <div class="card">
+        <h2 id="s-form-title">เพิ่มสกิลใหม่</h2>
+        <input id="s-id" type="hidden" />
+        <input id="s-name" placeholder="ชื่อสกิล เช่น เล่าเรื่องผีสไตล์ TikTok" />
+        <input id="s-desc" placeholder="คำอธิบายสั้นๆ" />
+        <textarea id="s-content" rows="10" placeholder="คำสั่ง/สไตล์ที่ให้ Claude ทำตาม เช่น โทนเสียง, โครงเรื่อง, hook 3 วินาทีแรก, คำลงท้าย..."></textarea>
+        <div class="row">
+          <label>สัดส่วนคลิป
+            <select id="s-aspect"><option>9:16</option><option>16:9</option><option>1:1</option></select>
+          </label>
+          <label>สีพื้น <input id="s-bg" type="color" value="#111827" /></label>
+          <label>สีซับ <input id="s-fg" type="color" value="#ffffff" /></label>
+          <label>เสียง <select id="s-voice"><option value="">(ใช้ค่าเริ่มต้น)</option></select></label>
+        </div>
+        <div class="row">
+          <button id="s-save" class="primary">บันทึกสกิล</button>
+          <button id="s-reset">ล้างฟอร์ม</button>
+        </div>
+      </div>
+      <div id="s-list" class="list"></div>
+    </section>
+
+    <!-- โปรเจกต์ -->
+    <section id="tab-projects" class="tab">
+      <div id="p-list" class="list"></div>
+    </section>
+
+    <!-- ตั้งค่า -->
+    <section id="tab-settings" class="tab">
+      <div class="card">
+        <h2>API keys</h2>
+        <p class="muted">เก็บไว้ในเครื่องที่รันเซิร์ฟเวอร์ (data/settings.json) ถ้าตั้งใน .env จะใช้ .env ก่อน</p>
+        <label>Anthropic API key <span id="st-a-cur" class="muted"></span>
+          <input id="st-a" type="password" placeholder="sk-ant-..." autocomplete="off" /></label>
+        <label>ElevenLabs API key <span id="st-e-cur" class="muted"></span>
+          <input id="st-e" type="password" placeholder="xi-..." autocomplete="off" /></label>
+        <label>ElevenLabs model
+          <select id="st-model">
+            <option value="eleven_v3">eleven_v3 (รองรับภาษาไทย)</option>
+            <option value="eleven_multilingual_v2">eleven_multilingual_v2</option>
+            <option value="eleven_flash_v2_5">eleven_flash_v2_5 (เร็ว/ถูก)</option>
+          </select></label>
+        <label>เสียงเริ่มต้น
+          <select id="st-voice"><option value="">— กดโหลดรายชื่อเสียง —</option></select></label>
+        <div class="row">
+          <button id="st-load-voices">โหลดรายชื่อเสียง</button>
+          <button id="st-save" class="primary">บันทึก</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- ตัวแก้ไขโปรเจกต์ -->
+    <section id="tab-editor" class="tab">
+      <div class="card">
+        <div class="row between">
+          <input id="e-title" class="title" />
+          <button id="e-back">← โปรเจกต์ทั้งหมด</button>
+        </div>
+        <div class="row">
+          <label>สกิล <select id="e-skill"></select></label>
+          <label>เสียง <select id="e-voice"><option value="">(ค่าเริ่มต้น)</option></select></label>
+        </div>
+        <div class="row">
+          <button id="e-save">💾 บันทึกบท</button>
+          <button id="e-voice-all" class="primary">🎙️ พากย์ทุกฉาก (ElevenLabs)</button>
+          <button id="e-render" class="primary">🎬 เรนเดอร์คลิป</button>
+          <button id="e-add">+ เพิ่มฉาก</button>
+        </div>
+        <div id="e-status" class="muted"></div>
+        <video id="e-video" controls class="hidden"></video>
+        <a id="e-download" class="hidden" download>⬇️ ดาวน์โหลด MP4</a>
+      </div>
+      <div id="e-scenes"></div>
+    </section>
+  </main>
+
+  <div id="toast"></div>
+  <script src="app.js" type="module"></script>
+</body>
+</html>
