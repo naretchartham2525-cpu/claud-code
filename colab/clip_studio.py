@@ -665,6 +665,11 @@ def build_app() -> gr.Blocks:
                             d_engine = gr.Radio([("edge-tts (ฟรี)", "edge"), ("ElevenLabs", "eleven")], value="edge",
                                                 label="เสียงพากย์")
                             d_emodel = gr.Dropdown(ELEVEN_MODELS, value="eleven_v3", label="โมเดล ElevenLabs")
+                        with gr.Row():
+                            d_bgmodel = gr.Dropdown(list(MODELS.items()), value="claude-sonnet-5-5",
+                                                    label="โมเดล Claude ที่ออกแบบฉาก (ต้องมี ANTHROPIC_API_KEY)")
+                            d_review = gr.Checkbox(True, label="ให้ Claude ดูภาพแล้วปรับอีกรอบ (สวยขึ้น แพงขึ้นเล็กน้อย)")
+                            d_redraw = gr.Button("🎨 ล้างฉากที่ Claude วาด (วาดใหม่ตอนเรนเดอร์ครั้งถัดไป)")
                         d_refresh = gr.State(0)
 
                         @gr.render(inputs=[d_pid, d_engine, d_refresh])
@@ -685,13 +690,13 @@ def build_app() -> gr.Blocks:
                                         dd.change(err(lambda v, cid=cid: _set_voice(pid_, cid, v)), dd, None)
                             else:
                                 gr.Markdown("_edge-tts ใช้เสียงไทยของ Microsoft ตามประเภทเสียงใน series.json (ฟรี ต้องมีอินเทอร์เน็ต)_")
-                            gr.Markdown("**ฉากหลังของแต่ละสถานที่** (ฉากสำเร็จรูป)")
+                            gr.Markdown("**ฉากหลังของแต่ละสถานที่** (ค่าเริ่มต้น: Claude ออกแบบจากบทตอนเรนเดอร์ วาดครั้งเดียวใช้ได้ทุกตอน)")
                             bgs = p.get("bgs", {})
                             with gr.Row():
                                 for pl in series.get("places", []):
                                     if "id" not in pl:
                                         continue
-                                    dd = gr.Dropdown([(v, k) for k, v in D.PRESETS.items()], value=bgs.get(pl["id"], "auto"),
+                                    dd = gr.Dropdown([(v, k) for k, v in D.PRESETS.items()], value=bgs.get(pl["id"], "claude"),
                                                      label=pl.get("name", pl["id"]), min_width=180)
                                     dd.change(err(lambda v, pid2=pl["id"]: _set_bg(pid_, pid2, v)), dd, None)
                     with gr.Accordion("4) ภาพตัวอย่าง & เรนเดอร์", open=True):
@@ -1131,19 +1136,46 @@ def build_app() -> gr.Blocks:
             return {"engine": engine, "model": emodel, "map": {k: x for k, x in v.get("map", {}).items() if x},
                     "default": v.get("default", "")}
 
+        def _ensure_bgs(p, root, pid_, ep_data, bgmodel, review, log):
+            d = pdir(pid_)
+            series = D.load(d, "series.json")
+            D.apply_backgrounds(d, series, p.get("bgs", {}))
+            try:
+                drawn = D.draw_backgrounds(root, d, series, ep_data, p.get("bgs", {}), bgmodel, review, log)
+                if drawn:
+                    gr.Info(f"Claude ออกแบบฉากใหม่ {len(drawn)} ที่")
+            except D.DramaError as e:
+                if str(e) == "NO_KEY":
+                    gr.Warning("ไม่มี ANTHROPIC_API_KEY: ฉากที่ยังไม่ได้วาดจะใช้ฉากสำเร็จรูปแทน")
+                else:
+                    gr.Warning(f"วาดฉากไม่สำเร็จ ใช้ฉากสำเร็จรูปแทน: {e}")
+
         @err
-        def still_(pid_, ep, n, engine, emodel):
+        def redraw_(pid_):
+            if not pid_:
+                raise UserError("เลือกซีรีส์ก่อน")
+            n = D.clear_claude_backgrounds(pdir(pid_))
+            gr.Info(f"ล้างแล้ว {n} ฉาก จะวาดใหม่ตอนเรนเดอร์ครั้งถัดไป")
+
+        d_redraw.click(redraw_, d_pid, None)
+
+        @err
+        def still_(pid_, ep, n, engine, emodel, bgmodel, review):
             if not pid_ or not ep:
                 raise UserError("เลือกตอนก่อน")
             p, _t, root = _drama_template(pid_)
-            D.apply_backgrounds(pdir(pid_), D.load(pdir(pid_), "series.json"), p.get("bgs", {}))
+            ep_data = D.load(pdir(pid_), ep)
+            shots = ep_data.get("shots", [])
+            k = min(max(int(n or 1), 1), len(shots)) - 1 if shots else 0
+            # ภาพตัวอย่าง: วาดเฉพาะฉากของช็อตนี้
+            _ensure_bgs(p, root, pid_, {"shots": shots[k:k + 1]}, bgmodel, review, print)
             img = D.render(root, pdir(pid_), ep, _voice_cfg(p, engine, emodel), still=int(n or 1))
             return str(img)
 
-        d_still.click(still_, [d_pid, d_ep, d_still_n, d_engine, d_emodel], d_img)
+        d_still.click(still_, [d_pid, d_ep, d_still_n, d_engine, d_emodel, d_bgmodel, d_review], d_img)
 
         @err
-        def render_(pid_, ep, engine, emodel, force, progress=gr.Progress()):
+        def render_(pid_, ep, engine, emodel, force, bgmodel, review, progress=gr.Progress()):
             if not pid_ or not ep:
                 raise UserError("เลือกตอนก่อน")
             p, _t, root = _drama_template(pid_)
@@ -1152,8 +1184,10 @@ def build_app() -> gr.Blocks:
             ok, out = D.check(root, pdir(pid_), ep)
             if not ok and not force:
                 raise UserError("บทยังไม่ผ่านการตรวจ กด ✅ ตรวจบท เพื่อดูว่าต้องแก้อะไร")
-            D.apply_backgrounds(pdir(pid_), D.load(pdir(pid_), "series.json"), p.get("bgs", {}))
             log = []
+            progress(0, desc="เตรียมฉากหลัง")
+            _ensure_bgs(p, root, pid_, D.load(pdir(pid_), ep), bgmodel, review,
+                        lambda m: (log.append(m), progress(0, desc=m[:60])))
 
             def on_line(line):
                 log.append(line)
@@ -1178,7 +1212,7 @@ def build_app() -> gr.Blocks:
             gr.Info("เรนเดอร์เสร็จ 🎉")
             return str(final), "\n".join(log[-60:])
 
-        d_render.click(render_, [d_pid, d_ep, d_engine, d_emodel, d_force], [d_video, d_log])
+        d_render.click(render_, [d_pid, d_ep, d_engine, d_emodel, d_force, d_bgmodel, d_review], [d_video, d_log])
 
         @err
         def d_del_(pid_, tid):
