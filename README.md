@@ -22,3 +22,14 @@ node --env-file=.env server.js
 
 - macOS/Windows ไม่มีฟอนต์ Garuda: ตั้ง `SUB_FONT` (ชื่อฟอนต์) และ `SUB_FONTS_DIR` (โฟลเดอร์ฟอนต์) ใน `.env`
 - ข้อมูลทั้งหมดอยู่ใน `data/` (สกิล, โปรเจกต์, ไฟล์เสียง/คลิป, settings.json ที่มี key — อย่า commit)
+
+## เวอร์ชัน Colab (Gradio)
+
+ใช้ไฟล์ `colab/ClipStudio.ipynb` (ไม่ต้องติดตั้งอะไรเอง)
+
+1. อัปโหลด `ClipStudio.ipynb` เข้า Colab (File → Upload notebook) หรือเปิดจาก GitHub
+2. เมนู 🔑 Secrets ใส่ `ELEVENLABS_API_KEY` และ `ANTHROPIC_API_KEY` (ถ้าจะให้ AI คิดบท) แล้วเปิด Notebook access
+3. Runtime → Run all แล้วกดลิงก์ `gradio.live`
+
+ข้อมูลเก็บใน Google Drive `MyDrive/ClipStudio` ไม่หายตอนปิด Colab
+แก้โค้ดที่ `colab/clip_studio.py` แล้วรัน `python colab/build_notebook.py` เพื่อสร้าง notebook ใหม่
