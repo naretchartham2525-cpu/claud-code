@@ -1181,6 +1181,12 @@ def build_app() -> gr.Blocks:
         # ===== events: viral
         VSTATE = DATA / "viral_state"
 
+        def vdir(pid_):
+            # ไฟล์ของ engine อยู่ใน clip/ (project.json ของ engine ห้ามชนกับ project.json ของเว็บ)
+            d = pdir(pid_) / "clip"
+            d.mkdir(parents=True, exist_ok=True)
+            return d
+
         def _viral_choices(tid=None):
             ps = [p for p in list_projects("viral") if not tid or p.get("templateId") == tid]
             return [(f"{p['title'][:50]} · {p['updatedAt'][5:16]}", p["id"]) for p in ps]
@@ -1193,7 +1199,7 @@ def build_app() -> gr.Blocks:
             return p, template_root(t)
 
         def _flist(pid_):
-            fl = V.footage_list(pdir(pid_))
+            fl = V.footage_list(vdir(pid_))
             if not fl:
                 return "_ยังไม่มีฟุตเทจ_", gr.update(choices=[], value=None)
             md = "| ไฟล์ | ยาว | ขนาด |\n|---|---|---|\n" + "\n".join(f"| {f['name']} | {f['dur']} วิ | {f['size']} |" for f in fl)
@@ -1202,7 +1208,7 @@ def build_app() -> gr.Blocks:
                 gr.update(choices=[f["name"] for f in fl], value=None)
 
         def _vo_view(pid_):
-            d = pdir(pid_)
+            d = vdir(pid_)
             f = d / "vo-tight.wav"
             if not f.exists():
                 return None, "_ยังไม่มีเสียง_"
@@ -1210,7 +1216,7 @@ def build_app() -> gr.Blocks:
             return str(f), f"✅ เสียงยาว {dur:.1f} วิ (ตัดช่วงเงียบแล้ว)"
 
         def _outputs(pid_):
-            fin = pdir(pid_) / "final"
+            fin = vdir(pid_) / "final"
             vids = sorted(str(x) for x in fin.glob("*.mp4") if "preview" not in x.name) if fin.exists() else []
             withm = next((x for x in vids if "ไม่มีเพลง" not in x), None)
             nom = next((x for x in vids if "ไม่มีเพลง" in x), None)
@@ -1221,7 +1227,7 @@ def build_app() -> gr.Blocks:
             if not pid_:
                 return ("", "", "", None, "", "_ยังไม่มีฟุตเทจ_", gr.update(choices=[]), None, None, None, [], "")
             p, root = _viral_root(pid_)
-            d = pdir(pid_)
+            d = vdir(pid_)
             script = (d / "script.txt").read_text("utf-8") if (d / "script.txt").exists() else ""
             audio, vinfo = _vo_view(pid_)
             fl, rmdd = _flist(pid_)
@@ -1242,12 +1248,12 @@ def build_app() -> gr.Blocks:
                 pid_ = _new_id()
                 p = {"id": pid_, "type": "viral", "templateId": tid, "createdAt": _now(), "title": (name or "คลิปใหม่").strip()}
                 save_project(p)
-                V.new_project(template_root(t), pdir(pid_), p["title"])
+                V.new_project(template_root(t), vdir(pid_), p["title"])
             else:
                 p = get_project(pid_)
                 if name.strip():
                     p["title"] = name.strip()
-            est = V.save_script(pdir(pid_), text)
+            est = V.save_script(vdir(pid_), text)
             p["target"] = int(sec or 60)
             save_project(p)
             msg = f"บันทึกแล้ว · บทยาวประมาณ **{est} วิ** (เป้า {int(sec or 60)} วิ)"
@@ -1258,7 +1264,7 @@ def build_app() -> gr.Blocks:
         v_save.click(v_save_, [c_skill, v_pid, v_name, v_script, v_sec], [v_proj, v_pid, v_sinfo])
 
         def _after_vo(pid_, p, root):
-            dur, _out = V.vo_prep(root, pdir(pid_), p.get("target", 60))
+            dur, _out = V.vo_prep(root, vdir(pid_), p.get("target", 60))
             if dur < p.get("target", 60) - 5:
                 gr.Warning(f"เสียงยาว {dur:.0f} วิ สั้นกว่าเป้า: เพิ่มบท 1-2 ประโยคแล้วทำเสียงใหม่")
             return _vo_view(pid_)
@@ -1269,7 +1275,7 @@ def build_app() -> gr.Blocks:
                 raise UserError("บันทึกบทก่อน")
             p, root = _viral_root(pid_)
             progress(0.2, desc="ElevenLabs กำลังสร้างเสียง")
-            V.tts(root, pdir(pid_), voice or V.DEFAULT_VOICE, vmodel)
+            V.tts(root, vdir(pid_), voice or V.DEFAULT_VOICE, vmodel)
             progress(0.8, desc="ตัดช่วงเงียบ + จับเวลาซับ")
             return _after_vo(pid_, p, root)
 
@@ -1282,7 +1288,7 @@ def build_app() -> gr.Blocks:
             if not f:
                 return gr.update(), gr.update()
             p, root = _viral_root(pid_)
-            V.import_voice(pdir(pid_), f if isinstance(f, str) else f.name)
+            V.import_voice(vdir(pid_), f if isinstance(f, str) else f.name)
             return _after_vo(pid_, p, root)
 
         v_vofile.upload(v_vofile_, [v_pid, v_vofile], [v_audio, v_vinfo])
@@ -1293,10 +1299,10 @@ def build_app() -> gr.Blocks:
                 raise UserError("บันทึกบทก่อน")
             p, root = _viral_root(pid_)
             log = []
-            got = V.claude_find_footage(root, pdir(pid_), model, lambda m: (log.append(m), progress(0.5, desc=m[:60])))
+            got = V.claude_find_footage(root, vdir(pid_), model, lambda m: (log.append(m), progress(0.5, desc=m[:60])))
             log += [f"✅ {g['name']}: {g['title'][:60]} ({g.get('why', '')})" for g in got]
             fl, rmdd = _flist(pid_)
-            return fl, rmdd, V.credits(root, pdir(pid_), p.get("title", "")), "\n".join(log)
+            return fl, rmdd, V.credits(root, vdir(pid_), p.get("title", "")), "\n".join(log)
 
         v_find.click(v_find_, [v_pid, v_model], [v_flist, v_rmname, v_credits, v_log])
 
@@ -1307,16 +1313,16 @@ def build_app() -> gr.Blocks:
             p, root = _viral_root(pid_)
             for k, f in enumerate(files or []):
                 progress(k / max(1, len(files)), desc="แปลงไฟล์วิดีโอ")
-                V.add_footage_file(pdir(pid_), f if isinstance(f, str) else f.name)
+                V.add_footage_file(vdir(pid_), f if isinstance(f, str) else f.name)
             fl, rmdd = _flist(pid_)
-            return fl, rmdd, V.credits(root, pdir(pid_), p.get("title", "")), None
+            return fl, rmdd, V.credits(root, vdir(pid_), p.get("title", "")), None
 
         v_upload.upload(v_upload_, [v_pid, v_upload], [v_flist, v_rmname, v_credits, v_upload])
 
         @err
         def v_rm_(pid_, name):
             if pid_ and name:
-                V.remove_footage(pdir(pid_), name)
+                V.remove_footage(vdir(pid_), name)
             return _flist(pid_) if pid_ else ("", gr.update())
 
         v_rm.click(v_rm_, [v_pid, v_rmname], [v_flist, v_rmname])
@@ -1327,12 +1333,12 @@ def build_app() -> gr.Blocks:
                 raise UserError("บันทึกบทก่อน")
             p, root = _viral_root(pid_)
             progress(0.1, desc="จัดช็อตตามเสียง")
-            V.auto_cut(pdir(pid_), root)
+            V.auto_cut(vdir(pid_), root)
             progress(0.3, desc="สร้าง footage.mp4")
-            out = V.build(root, pdir(pid_), VSTATE)
-            V.default_covers(pdir(pid_))
+            out = V.build(root, vdir(pid_), VSTATE)
+            V.default_covers(vdir(pid_))
             progress(0.9, desc="พรีวิว")
-            return str(V.preview(root, pdir(pid_), VSTATE, "0.3,15,30")), out.strip().splitlines()[-1] if out.strip() else ""
+            return str(V.preview(root, vdir(pid_), VSTATE, "0.3,15,30")), out.strip().splitlines()[-1] if out.strip() else ""
 
         v_auto.click(v_auto_, v_pid, [v_preview, v_log])
 
@@ -1342,8 +1348,8 @@ def build_app() -> gr.Blocks:
                 raise UserError("บันทึกบทก่อน")
             p, root = _viral_root(pid_)
             log = []
-            V.claude_cut(root, pdir(pid_), model, VSTATE, review, lambda m: (log.append(m), progress(0.5, desc=m[:60])))
-            prev = V.preview(root, pdir(pid_), VSTATE, "0,0.25,0.5,15,30")
+            V.claude_cut(root, vdir(pid_), model, VSTATE, review, lambda m: (log.append(m), progress(0.5, desc=m[:60])))
+            prev = V.preview(root, vdir(pid_), VSTATE, "0,0.25,0.5,15,30")
             gr.Info("Claude ตัดต่อเสร็จ ดูพรีวิวก่อนเรนเดอร์")
             return str(prev), "\n".join(log)
 
@@ -1356,11 +1362,11 @@ def build_app() -> gr.Blocks:
             p, root = _viral_root(pid_)
             log = []
             progress(0.05, desc="เรนเดอร์ภาพ + เสียงประกอบ")
-            V.render(root, pdir(pid_), VSTATE, lambda m: (log.append(m), progress(0.5, desc=m[:60])))
+            V.render(root, vdir(pid_), VSTATE, lambda m: (log.append(m), progress(0.5, desc=m[:60])))
             o1, o2, gal = _outputs(pid_)
             # ชื่อไฟล์ใหม่กัน browser cache
             gr.Info("เรนเดอร์เสร็จ 🎉")
-            return o1, o2, gal, V.credits(root, pdir(pid_), p.get("title", "")), "\n".join(log[-40:])
+            return o1, o2, gal, V.credits(root, vdir(pid_), p.get("title", "")), "\n".join(log[-40:])
 
         v_render.click(v_render_, v_pid, [v_out1, v_out2, v_covers, v_credits, v_log])
 
