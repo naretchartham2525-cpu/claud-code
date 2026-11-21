@@ -25,7 +25,7 @@ node --env-file=.env server.js
 
 ## เวอร์ชัน Colab (Gradio)
 
-ใช้ไฟล์ `colab/ClipStudio.ipynb` (ไม่ต้องติดตั้งอะไรเอง)
+ใช้ไฟล์ `colab/ClipStudio.ipynb` (ไม่ต้องติดตั้งอะไรเอง) หรือก๊อปทั้งไฟล์ `colab/ClipStudio_1cell.py` ไปวางใน Colab cell เดียวแล้วกดรัน
 
 1. อัปโหลด `ClipStudio.ipynb` เข้า Colab (File → Upload notebook) หรือเปิดจาก GitHub
 2. เมนู 🔑 Secrets ใส่ `ELEVENLABS_API_KEY` และ `ANTHROPIC_API_KEY` (ถ้าจะให้ AI คิดบท) แล้วเปิด Notebook access
@@ -43,4 +43,4 @@ node --env-file=.env server.js
 - 📝 **ข้อความ** (.md/.txt หรือ zip ที่ไม่มีโค้ด): สไตล์บท + สี/ซับ ใช้กับโหมดบทแบบเดิม
 
 ไฟล์เทมเพลตที่มีลิขสิทธิ์ห้ามแจกจ่าย จึงไม่ได้ใส่ไว้ใน repo นี้ ต้องอัปเข้าเว็บเอง
-แก้โค้ดที่ `colab/clip_studio.py` แล้วรัน `python colab/build_notebook.py` เพื่อสร้าง notebook ใหม่
+แก้โค้ดที่ `colab/*.py` แล้วรัน `python colab/build_notebook.py` และ `python colab/build_one_cell.py` เพื่อสร้าง notebook / cell เดียวใหม่
