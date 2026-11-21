@@ -608,12 +608,14 @@ def apply_table(p: dict, df) -> dict:
 # ---------------------------------------------------------------- UI
 def build_app() -> gr.Blocks:
     def err(fn):
+        import functools
+
+        @functools.wraps(fn)  # คง signature ไว้ให้ Gradio ส่ง gr.Progress เข้ามาได้
         def wrapped(*a, **k):
             try:
                 return fn(*a, **k)
             except (UserError, D.DramaError) as e:
                 raise gr.Error(str(e), duration=None)
-        wrapped.__name__ = fn.__name__
         return wrapped
 
     with gr.Blocks(title="Clip Studio") as app:
@@ -642,7 +644,7 @@ def build_app() -> gr.Blocks:
 
                 with gr.Group(visible=False) as g_drama:
                     gr.Markdown("### 🎭 ละครการ์ตูน\n1) วาง series.json → 2) วางบทตอน epNN.json → 3) ตรวจบท → "
-                                "4) เลือกเสียง/ฉาก → 5) ดูภาพตัวอย่าง → 6) เรนเดอร์")
+                                "4) เลือกเสียง → 5) เช็กฉาก ให้ Claude วาด แล้วอนุมัติ → 6) ดูภาพตัวอย่าง → เรนเดอร์")
                     d_pid = gr.State("")
                     with gr.Row():
                         d_proj = gr.Dropdown([], label="ซีรีส์ (ว่าง = สร้างใหม่จาก series.json)", scale=4)
@@ -660,16 +662,11 @@ def build_app() -> gr.Blocks:
                             d_sec = gr.Number(value=90, precision=0, label="ความยาวเป้าหมาย (วินาที)")
                             d_check = gr.Button("✅ ตรวจบท")
                         d_check_out = gr.Textbox(label="ผลตรวจบท", lines=6, interactive=False)
-                    with gr.Accordion("3) เสียงพากย์ & ฉากหลัง", open=True):
+                    with gr.Accordion("3) เสียงพากย์", open=True):
                         with gr.Row():
                             d_engine = gr.Radio([("edge-tts (ฟรี)", "edge"), ("ElevenLabs", "eleven")], value="edge",
                                                 label="เสียงพากย์")
                             d_emodel = gr.Dropdown(ELEVEN_MODELS, value="eleven_v3", label="โมเดล ElevenLabs")
-                        with gr.Row():
-                            d_bgmodel = gr.Dropdown(list(MODELS.items()), value="claude-sonnet-5-5",
-                                                    label="โมเดล Claude ที่ออกแบบฉาก (ต้องมี ANTHROPIC_API_KEY)")
-                            d_review = gr.Checkbox(True, label="ให้ Claude ดูภาพแล้วปรับอีกรอบ (สวยขึ้น แพงขึ้นเล็กน้อย)")
-                            d_redraw = gr.Button("🎨 ล้างฉากที่ Claude วาด (วาดใหม่ตอนเรนเดอร์ครั้งถัดไป)")
                         d_refresh = gr.State(0)
 
                         @gr.render(inputs=[d_pid, d_engine, d_refresh])
@@ -690,16 +687,78 @@ def build_app() -> gr.Blocks:
                                         dd.change(err(lambda v, cid=cid: _set_voice(pid_, cid, v)), dd, None)
                             else:
                                 gr.Markdown("_edge-tts ใช้เสียงไทยของ Microsoft ตามประเภทเสียงใน series.json (ฟรี ต้องมีอินเทอร์เน็ต)_")
-                            gr.Markdown("**ฉากหลังของแต่ละสถานที่** (ค่าเริ่มต้น: Claude ออกแบบจากบทตอนเรนเดอร์ วาดครั้งเดียวใช้ได้ทุกตอน)")
-                            bgs = p.get("bgs", {})
-                            with gr.Row():
-                                for pl in series.get("places", []):
-                                    if "id" not in pl:
-                                        continue
-                                    dd = gr.Dropdown([(v, k) for k, v in D.PRESETS.items()], value=bgs.get(pl["id"], "claude"),
-                                                     label=pl.get("name", pl["id"]), min_width=180)
-                                    dd.change(err(lambda v, pid2=pl["id"]: _set_bg(pid_, pid2, v)), dd, None)
-                    with gr.Accordion("4) ภาพตัวอย่าง & เรนเดอร์", open=True):
+                    with gr.Accordion("4) ฉากหลัง: เช็กฉากที่ยังไม่มี → Claude วาด → ดูแล้วอนุมัติ", open=True):
+                        with gr.Row():
+                            d_bgmodel = gr.Dropdown(list(MODELS.items()), value="claude-sonnet-5-5",
+                                                    label="โมเดล Claude ที่วาดฉาก (ต้องมี ANTHROPIC_API_KEY)")
+                            d_review = gr.Checkbox(True, label="ให้ Claude ดูภาพตัวเองแล้วปรับอีกรอบก่อนโชว์ (สวยขึ้น แพงขึ้นเล็กน้อย)")
+
+                        @gr.render(inputs=[d_pid, d_refresh])
+                        def _bg_panel(pid_, r):
+                            if not pid_ or not (pdir(pid_) / "series.json").exists():
+                                gr.Markdown("_บันทึก series.json + บทตอนก่อน แล้วรายการฉากจะขึ้นที่นี่_")
+                                return
+                            p = get_project(pid_)
+                            series = D.load(pdir(pid_), "series.json")
+                            lib_dir = _lib_dir(p)
+                            lib = D.library(lib_dir)
+                            sts = D.bg_status(pdir(pid_), series, p.get("bgs", {}), lib_dir)
+                            used = [x for x in sts if x["used"]]
+                            missing = [x for x in used if x["state"] == "missing"]
+                            pending = [x for x in sts if x["cand"]]
+                            gr.Markdown(
+                                f"**สถานที่ในบท {len(used)} ที่** · มีฉากแล้ว {len(used) - len(missing)} · "
+                                f"⚠️ ยังไม่มี {len(missing)}" + (f" ({', '.join(x['place'].get('name', x['place']['id']) for x in missing)})" if missing else "")
+                                + (f" · 🆕 รออนุมัติ {len(pending)}" if pending else "")
+                                + "\n\n_ฉากที่ยังไม่มีตอนเรนเดอร์จะใช้ฉากสำเร็จรูปแทน_")
+                            if missing:
+                                b_all = gr.Button(f"🎨 ให้ Claude วาดฉากที่ยังไม่มีทั้งหมด ({len(missing)} ที่)", variant="primary")
+                                b_all.click(err(lambda bm, rv, rr, progress=gr.Progress(): _draw_many(pid_, [x["place"] for x in missing], bm, rv, progress) or rr + 1),
+                                            [d_bgmodel, d_review, d_refresh], d_refresh)
+                            src = ([("🎨 ฉากที่ Claude วาด (อนุมัติแล้ว)", "claude")]
+                                   + [(f"📚 {it['name']}" + (f" · {it['series']}" if it.get("series") else ""), "lib:" + it["id"]) for it in lib]
+                                   + [(v, k) for k, v in D.PRESETS.items() if k != "claude"])
+                            label = {"approved": "✅ ฉากที่ Claude วาด", "library": "📚 จากคลังฉาก", "preset": "🧱 ฉากสำเร็จรูป",
+                                     "missing": "⚠️ ยังไม่มีฉาก"}
+                            def _row(st):
+                                pl = st["place"]
+                                plid = pl["id"]
+                                with gr.Group():
+                                    gr.Markdown(f"#### {pl.get('name', plid)} · {label[st['state']]}"
+                                                + ("" if st["used"] else " · _(บทตอนที่มียังไม่ใช้)_"))
+                                    with gr.Row():
+                                        if st["preview"]:
+                                            gr.Image(st["preview"], label="ฉากที่ใช้อยู่", height=320, interactive=False)
+                                        if st["cand"]:
+                                            gr.Image(st["cand"], label="🆕 Claude วาดใหม่ (รออนุมัติ)", height=320, interactive=False)
+                                        with gr.Column():
+                                            dd = gr.Dropdown(src, value=st["key"], label="ใช้ฉากจาก")
+                                            dd.change(err(lambda v, rr, plid=plid: _set_bg(pid_, plid, v) or rr + 1), [dd, d_refresh], d_refresh)
+                                            if st["suggest"]:
+                                                sg = st["suggest"]
+                                                b_sg = gr.Button(f"💡 ใช้ฉากในคลังที่คล้ายกัน: {sg['name']}")
+                                                b_sg.click(err(lambda rr, plid=plid, lid=sg["id"]: _set_bg(pid_, plid, "lib:" + lid) or rr + 1),
+                                                           d_refresh, d_refresh)
+                                            fb = gr.Textbox(label="อยากให้ปรับอะไร (ไม่บังคับ)", placeholder="เช่น ให้เป็นกลางคืน มีโต๊ะพับสีฟ้า")
+                                            b_draw = gr.Button("🔁 ให้ Claude วาดใหม่" if (st["cand"] or st["preview"]) else "🎨 ให้ Claude วาด")
+                                            b_draw.click(err(lambda f, bm, rv, rr, plid=plid, progress=gr.Progress():
+                                                             _draw_one(pid_, plid, bm, rv, f, progress) or rr + 1),
+                                                         [fb, d_bgmodel, d_review, d_refresh], d_refresh)
+                                            if st["cand"]:
+                                                b_ok = gr.Button("✅ ใช้ฉากนี้ + เก็บเข้าคลัง", variant="primary")
+                                                b_ok.click(err(lambda rr, plid=plid: _approve(pid_, plid) or rr + 1), d_refresh, d_refresh)
+                                                b_no = gr.Button("❌ ไม่เอา")
+                                                b_no.click(err(lambda rr, plid=plid: D.discard_candidate(pdir(pid_), plid) or rr + 1),
+                                                           d_refresh, d_refresh)
+
+                            for st in [x for x in sts if x["used"]]:
+                                _row(st)
+                            unused = [x for x in sts if not x["used"]]
+                            if unused:
+                                with gr.Accordion(f"สถานที่ที่บทยังไม่ใช้ ({len(unused)})", open=False):
+                                    for st in unused:
+                                        _row(st)
+                    with gr.Accordion("5) ภาพตัวอย่าง & เรนเดอร์", open=True):
                         with gr.Row():
                             d_still_n = gr.Number(value=1, precision=0, minimum=1, label="ช็อตที่")
                             d_still = gr.Button("🖼️ ดูภาพตัวอย่างช็อตนี้")
@@ -1118,7 +1177,7 @@ def build_app() -> gr.Blocks:
             gr.Info(f"บันทึก {name} แล้ว")
             return gr.update(choices=D.episodes(pdir(pid_)), value=name)
 
-        d_save_ep.click(save_ep_, [d_pid, d_ep_text], d_ep)
+        d_save_ep.click(save_ep_, [d_pid, d_ep_text], d_ep).then(lambda r: r + 1, d_refresh, d_refresh)
 
         @err
         def check_(pid_, ep, sec):
@@ -1136,46 +1195,70 @@ def build_app() -> gr.Blocks:
             return {"engine": engine, "model": emodel, "map": {k: x for k, x in v.get("map", {}).items() if x},
                     "default": v.get("default", "")}
 
-        def _ensure_bgs(p, root, pid_, ep_data, bgmodel, review, log):
+        def _lib_dir(p):
+            t = get_template(p.get("templateId")) or {"name": "unknown"}
+            return DATA / "bg_library" / re.sub(r"[^\w-]+", "_", t["name"])
+
+        def _place(pid_, plid):
+            for pl in D.load(pdir(pid_), "series.json").get("places", []):
+                if pl.get("id") == plid:
+                    return pl
+            raise UserError("ไม่พบสถานที่นี้ใน series.json")
+
+        def _draw_one(pid_, plid, model, review, feedback, progress=None):
+            p, _t, root = _drama_template(pid_)
+            say = (lambda m: progress(0, desc=m[:70])) if progress else print
+            D.draw_candidate(root, pdir(pid_), D.load(pdir(pid_), "series.json"), _place(pid_, plid), model,
+                             review, feedback or "", say)
+            gr.Info("วาดเสร็จ ดูภาพแล้วกด ✅ ถ้าโอเค")
+
+        def _draw_many(pid_, places, model, review, progress=None):
+            p, _t, root = _drama_template(pid_)
+            series = D.load(pdir(pid_), "series.json")
+            fails = []
+            for k, pl in enumerate(places):
+                if progress:
+                    progress(k / len(places), desc=f"Claude วาด {pl.get('name', pl['id'])} ({k + 1}/{len(places)})")
+                try:
+                    D.draw_candidate(root, pdir(pid_), series, pl, model, review, "", print)
+                except D.DramaError as e:
+                    if "ANTHROPIC_API_KEY" in str(e) or "API key" in str(e):
+                        raise
+                    fails.append(f"{pl.get('name', pl['id'])}: {e}")
+            if fails:
+                gr.Warning("วาดไม่สำเร็จ: " + " | ".join(fails)[:400])
+            gr.Info("วาดเสร็จ ดูแต่ละภาพแล้วกด ✅ ที่ฉากที่โอเค")
+
+        def _approve(pid_, plid):
+            p = get_project(pid_)
+            D.approve_candidate(pdir(pid_), _place(pid_, plid), _lib_dir(p), p.get("title", ""))
+            p = get_project(pid_)
+            p.setdefault("bgs", {})[plid] = "claude"
+            save_project(p)
+            gr.Info("ใช้ฉากนี้แล้ว และเก็บเข้าคลังฉาก (ซีรีส์อื่นเลือกใช้ได้)")
+
+        def _prep_bgs(p, pid_):
             d = pdir(pid_)
             series = D.load(d, "series.json")
-            D.apply_backgrounds(d, series, p.get("bgs", {}))
-            try:
-                drawn = D.draw_backgrounds(root, d, series, ep_data, p.get("bgs", {}), bgmodel, review, log)
-                if drawn:
-                    gr.Info(f"Claude ออกแบบฉากใหม่ {len(drawn)} ที่")
-            except D.DramaError as e:
-                if str(e) == "NO_KEY":
-                    gr.Warning("ไม่มี ANTHROPIC_API_KEY: ฉากที่ยังไม่ได้วาดจะใช้ฉากสำเร็จรูปแทน")
-                else:
-                    gr.Warning(f"วาดฉากไม่สำเร็จ ใช้ฉากสำเร็จรูปแทน: {e}")
+            D.apply_backgrounds(d, series, p.get("bgs", {}), _lib_dir(p))
+            miss = [x["place"].get("name", x["place"]["id"]) for x in D.bg_status(d, series, p.get("bgs", {}), _lib_dir(p))
+                    if x["used"] and x["state"] == "missing"]
+            if miss:
+                gr.Warning(f"ยังไม่มีฉาก: {', '.join(miss)} → ใช้ฉากสำเร็จรูปแทน (ไปที่ขั้น 4 ให้ Claude วาดได้)")
 
         @err
-        def redraw_(pid_):
-            if not pid_:
-                raise UserError("เลือกซีรีส์ก่อน")
-            n = D.clear_claude_backgrounds(pdir(pid_))
-            gr.Info(f"ล้างแล้ว {n} ฉาก จะวาดใหม่ตอนเรนเดอร์ครั้งถัดไป")
-
-        d_redraw.click(redraw_, d_pid, None)
-
-        @err
-        def still_(pid_, ep, n, engine, emodel, bgmodel, review):
+        def still_(pid_, ep, n, engine, emodel):
             if not pid_ or not ep:
                 raise UserError("เลือกตอนก่อน")
             p, _t, root = _drama_template(pid_)
-            ep_data = D.load(pdir(pid_), ep)
-            shots = ep_data.get("shots", [])
-            k = min(max(int(n or 1), 1), len(shots)) - 1 if shots else 0
-            # ภาพตัวอย่าง: วาดเฉพาะฉากของช็อตนี้
-            _ensure_bgs(p, root, pid_, {"shots": shots[k:k + 1]}, bgmodel, review, print)
+            _prep_bgs(p, pid_)
             img = D.render(root, pdir(pid_), ep, _voice_cfg(p, engine, emodel), still=int(n or 1))
             return str(img)
 
-        d_still.click(still_, [d_pid, d_ep, d_still_n, d_engine, d_emodel, d_bgmodel, d_review], d_img)
+        d_still.click(still_, [d_pid, d_ep, d_still_n, d_engine, d_emodel], d_img)
 
         @err
-        def render_(pid_, ep, engine, emodel, force, bgmodel, review, progress=gr.Progress()):
+        def render_(pid_, ep, engine, emodel, force, progress=gr.Progress()):
             if not pid_ or not ep:
                 raise UserError("เลือกตอนก่อน")
             p, _t, root = _drama_template(pid_)
@@ -1185,9 +1268,7 @@ def build_app() -> gr.Blocks:
             if not ok and not force:
                 raise UserError("บทยังไม่ผ่านการตรวจ กด ✅ ตรวจบท เพื่อดูว่าต้องแก้อะไร")
             log = []
-            progress(0, desc="เตรียมฉากหลัง")
-            _ensure_bgs(p, root, pid_, D.load(pdir(pid_), ep), bgmodel, review,
-                        lambda m: (log.append(m), progress(0, desc=m[:60])))
+            _prep_bgs(p, pid_)
 
             def on_line(line):
                 log.append(line)
@@ -1212,7 +1293,7 @@ def build_app() -> gr.Blocks:
             gr.Info("เรนเดอร์เสร็จ 🎉")
             return str(final), "\n".join(log[-60:])
 
-        d_render.click(render_, [d_pid, d_ep, d_engine, d_emodel, d_force, d_bgmodel, d_review], [d_video, d_log])
+        d_render.click(render_, [d_pid, d_ep, d_engine, d_emodel, d_force], [d_video, d_log])
 
         @err
         def d_del_(pid_, tid):
@@ -1240,9 +1321,13 @@ def build_app() -> gr.Blocks:
                 except Exception:  # noqa: BLE001 — ไม่ให้หน้าเว็บพังเพราะโหลดเสียงไม่ได้
                     pass
             ch = _voice_choices()
-            return gr.update(choices=ch), gr.update(choices=ch)
+            # รายชื่อเทมเพลต/โปรเจกต์ล่าสุดทุกครั้งที่เปิดหน้า (ไม่งั้นรีเฟรชแล้วเห็นของเก่า)
+            return (gr.update(choices=ch), gr.update(choices=ch),
+                    gr.update(choices=[("(ไม่ใช้เทมเพลต)", "")] + _template_choices()),
+                    gr.update(choices=_template_choices()), gr.update(choices=_skill_choices()),
+                    gr.update(choices=_project_choices()))
 
-        app.load(on_start, None, [e_voice, s_voice])
+        app.load(on_start, None, [e_voice, s_voice, c_skill, s_pick, e_skill, e_proj])
         d_engine.change(err(lambda pid_, v: _set_engine(pid_, v)), [d_pid, d_engine], None)
 
         def _set_engine(pid_, v):

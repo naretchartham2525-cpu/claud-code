@@ -11,7 +11,7 @@ import sys
 from pathlib import Path
 
 RUNNER = Path(__file__).with_name("drama_runner.py")
-PRESETS = {"claude": "🎨 Claude ออกแบบจากบท", "auto": "สำเร็จรูป (เดาจากชื่อ)", "market": "ตลาดสด", "rented_room": "ห้องเช่า", "garage": "อู่ซ่อมรถ"}
+PRESETS = {"claude": "🎨 ฉากที่ Claude วาด (อนุมัติแล้ว)", "auto": "สำเร็จรูป (เดาจากชื่อ)", "market": "ตลาดสด", "rented_room": "ห้องเช่า", "garage": "อู่ซ่อมรถ"}
 
 
 class DramaError(Exception):
@@ -98,8 +98,12 @@ def check(root: Path, pdir: Path, ep_name: str, sec: int = 0) -> tuple[bool, str
     return last.startswith("PASS"), out
 
 
-def apply_backgrounds(pdir: Path, series: dict, choice: dict) -> None:
-    """เขียน bg/<place>.py ให้ใช้ฉากสำเร็จรูปที่เลือก (auto = ให้ engine เดาเอง)"""
+def apply_backgrounds(pdir: Path, series: dict, choice: dict, lib_dir: Path | None = None) -> None:
+    """ตั้งฉากของแต่ละสถานที่ (bg/<place>.py/.png ที่ engine อ่าน) ตามที่เลือก
+    claude = ฉากที่ Claude วาดและอนุมัติแล้ว (bg/_approved) · lib:<id> = จากคลังฉาก · auto = engine เดา · อื่นๆ = ฉากสำเร็จรูป"""
+    import os
+    import shutil
+
     bg = pdir / "bg"
     bg.mkdir(exist_ok=True)
     for i, pl in enumerate(series.get("places", [])):
@@ -108,12 +112,25 @@ def apply_backgrounds(pdir: Path, series: dict, choice: dict) -> None:
             continue
         key = choice.get(pid, "claude")
         py, png = bg / f"{pid}.py", bg / f"{pid}.png"
-        mark = f"# clipstudio-preset: {key}\n"
-        if key in ("auto", "claude"):
-            if py.exists() and py.read_text("utf-8").startswith("# clipstudio-preset"):
-                py.unlink()
+        src = None
+        if key == "claude":
+            src = bg / "_approved" / pid
+        elif key.startswith("lib:") and lib_dir:
+            src = lib_dir / key[4:] / "draw"
+        if src is not None:
+            if src.with_suffix(".py").exists() and src.with_suffix(".png").exists():
+                shutil.copy(src.with_suffix(".py"), py)
+                shutil.copy(src.with_suffix(".png"), png)
+                os.utime(png)  # png ใหม่กว่า .py -> engine ใช้ภาพเลย ไม่รันโค้ดซ้ำ
+            else:  # ยังไม่มีฉาก: ให้ engine ใช้ฉากสำเร็จรูปที่เดาจากชื่อ
+                py.unlink(missing_ok=True)
                 png.unlink(missing_ok=True)
             continue
+        if key == "auto" or key not in PRESETS:
+            py.unlink(missing_ok=True)
+            png.unlink(missing_ok=True)
+            continue
+        mark = f"# clipstudio-preset: {key}\n"
         if py.exists() and py.read_text("utf-8").startswith(mark):
             continue  # ตั้งไว้แบบนี้อยู่แล้ว
         py.write_text(mark + "from scene_kit import PRESETS\n\n\ndef draw():\n"
@@ -122,12 +139,20 @@ def apply_backgrounds(pdir: Path, series: dict, choice: dict) -> None:
 
 
 def render(root: Path, pdir: Path, ep_name: str, voice_cfg: dict, still: int = 0, on_line=None) -> Path:
+    if voice_cfg.get("engine") == "eleven":  # ข้อความใน engine เขียนว่า edge-tts เสมอ แก้ให้ตรงกับที่ใช้จริง
+        _cb = on_line
+
+        def on_line(line, _cb=_cb):
+            if _cb:
+                _cb(line.replace("with edge-tts", "with ElevenLabs"))
     cfg = pdir / ".voice_cfg.json"
     cfg.write_text(json.dumps(voice_cfg, ensure_ascii=False), "utf-8")
     args = [str(pdir / ep_name)]
     if still:
         args += ["--still", str(still)]
     out = _run([sys.executable, str(RUNNER), str(root), str(cfg), "--"] + args, pdir, on_line)
+    if voice_cfg.get("engine") == "eleven":
+        out = out.replace("with edge-tts", "with ElevenLabs")
     if "ERROR" in out and "DONE" not in out and "still saved" not in out:
         raise DramaError(out[-3000:])
     if still:
@@ -147,7 +172,6 @@ def render(root: Path, pdir: Path, ep_name: str, voice_cfg: dict, still: int = 0
 
 
 # ---------------------------------------------------------------- ฉากหลังที่ Claude ออกแบบจากบท
-CLAUDE_MARK = "# clipstudio-claude"
 BG_BUILD = r"""
 import sys, importlib.util
 sys.path.insert(0, sys.argv[1])
@@ -163,22 +187,13 @@ Image.fromarray(cv2.resize(img, (1080, 1920), interpolation=cv2.INTER_AREA)).sav
 """
 
 
-def used_places(series: dict, ep: dict) -> list[dict]:
-    used = {s.get("place") for s in ep.get("shots", []) if s.get("type") == "scene"}
-    return [p for p in series.get("places", []) if p.get("id") in used and re.fullmatch(r"[\w-]+", p["id"])]
-
-
-def needs_drawing(pdir: Path, places: list[dict], choice: dict) -> list[dict]:
-    """สถานที่ที่ตั้งเป็น 'claude' และยังไม่มีฉาก (ไฟล์ .py ของ Claude หรือ .png ที่อัปเอง)"""
-    out = []
-    for pl in places:
-        if choice.get(pl["id"], "claude") != "claude":
-            continue
-        py, png = pdir / "bg" / f"{pl['id']}.py", pdir / "bg" / f"{pl['id']}.png"
-        if (py.exists() and not py.read_text("utf-8").startswith("# clipstudio-preset")) or (png.exists() and not py.exists()):
-            continue
-        out.append(pl)
-    return out
+def used_place_ids(pdir: Path) -> set[str]:
+    ids = set()
+    for name in episodes(pdir):
+        for sh in load(pdir, name).get("shots", []):
+            if sh.get("type") == "scene" and sh.get("place"):
+                ids.add(sh["place"])
+    return ids
 
 
 def _bg_context(root: Path) -> str:
@@ -192,16 +207,17 @@ def _bg_context(root: Path) -> str:
     return "\n\n".join(parts)
 
 
-def _place_brief(pl: dict, ep: dict, series: dict) -> str:
+def _place_brief(pl: dict, pdir: Path, series: dict) -> str:
     acts = []
-    for s in ep.get("shots", []):
-        if s.get("place") == pl["id"]:
-            acts += [c.get("action", "") for c in s.get("chars", []) if c.get("action")]
-            if s.get("sfx"):
-                acts.append("sfx: " + s["sfx"])
+    for name in episodes(pdir):
+        for sh in load(pdir, name).get("shots", []):
+            if sh.get("place") == pl["id"]:
+                acts += [c.get("action", "") for c in sh.get("chars", []) if c.get("action")]
+                if sh.get("sfx"):
+                    acts.append("sfx: " + sh["sfx"])
     return (f"สถานที่: {json.dumps(pl, ensure_ascii=False)}\n"
             f"เรื่อง: {series.get('plot', '')[:600]}\n"
-            f"สิ่งที่เกิดในฉากนี้ (ตอนนี้): {'; '.join(acts[:12])}")
+            f"สิ่งที่เกิดในสถานที่นี้ตามบท: {'; '.join(dict.fromkeys(acts))[:1500]}")
 
 
 def _extract_code(text: str) -> str:
@@ -219,20 +235,22 @@ def _build_png(root: Path, py: Path, png: Path) -> None:
         raise RuntimeError((r.stderr or r.stdout)[-1500:])
 
 
-def draw_backgrounds(root: Path, pdir: Path, series: dict, ep: dict, choice: dict, model: str,
-                     review: bool = True, log=print) -> list[str]:
-    """ให้ Claude เขียนโค้ดวาดฉาก (ตามคู่มือในเทมเพลต) สำหรับสถานที่ที่ยังไม่มีฉาก คืนรายชื่อที่วาดได้"""
+def cand_paths(pdir: Path, pid: str) -> tuple[Path, Path]:
+    d = pdir / "bg" / "_cand"
+    return d / f"{pid}.py", d / f"{pid}.png"
+
+
+def draw_candidate(root: Path, pdir: Path, series: dict, place: dict, model: str,
+                   review: bool = True, feedback: str = "", log=print) -> Path:
+    """ให้ Claude วาดฉากตัวเลือก (ยังไม่ใช้จริงจนกว่าจะอนุมัติ) คืน path ภาพ"""
     import base64
     import io
     import os
 
     import anthropic
 
-    todo = needs_drawing(pdir, used_places(series, ep), choice)
-    if not todo:
-        return []
     if not os.environ.get("ANTHROPIC_API_KEY"):
-        raise DramaError("NO_KEY")
+        raise DramaError("ยังไม่ได้ใส่ ANTHROPIC_API_KEY (Colab: เมนู 🔑 Secrets) จึงให้ Claude วาดฉากไม่ได้")
     client = anthropic.Anthropic()
     system = [
         {"type": "text", "text":
@@ -257,62 +275,140 @@ def draw_backgrounds(root: Path, pdir: Path, series: dict, ep: dict, choice: dic
             raise DramaError("เชื่อมต่อ Claude ไม่ได้")
         if res.stop_reason == "refusal":
             raise DramaError("Claude ปฏิเสธการวาดฉากนี้")
-        text = "".join(b.text for b in res.content if b.type == "text")
-        return res.content, text
+        return res.content, "".join(b.text for b in res.content if b.type == "text")
 
-    done = []
-    (pdir / "bg").mkdir(exist_ok=True)
-    for pl in todo:
-        py, png = pdir / "bg" / f"{pl['id']}.py", pdir / "bg" / f"{pl['id']}.png"
-        log(f"🎨 Claude กำลังออกแบบฉาก: {pl.get('name', pl['id'])}")
-        msgs = [{"role": "user", "content": "วาดฉากหลังสำหรับสถานที่นี้\n" + _place_brief(pl, ep, series)}]
-        ok = False
-        for attempt in range(3):  # ถ้าโค้ดพัง ส่ง error กลับไปให้แก้ (สูงสุด 2 ครั้ง)
-            content, text = ask(msgs)
-            code = _extract_code(text)
-            py.write_text(CLAUDE_MARK + "\n" + code + "\n", "utf-8")
+    py, png = cand_paths(pdir, place["id"])
+    py.parent.mkdir(parents=True, exist_ok=True)
+    ask_text = "วาดฉากหลังสำหรับสถานที่นี้\n" + _place_brief(place, pdir, series)
+    if feedback.strip():
+        prev = py.read_text("utf-8") if py.exists() else ""
+        ask_text += f"\n\nผู้ใช้อยากให้ปรับ: {feedback.strip()}"
+        if prev:
+            ask_text += f"\n\nโค้ดฉบับก่อนหน้า (แก้จากอันนี้):\n```python\n{prev}\n```"
+    log(f"🎨 Claude กำลังวาดฉาก: {place.get('name', place['id'])}")
+    msgs = [{"role": "user", "content": ask_text}]
+    content, last_err = None, ""
+    for attempt in range(3):  # โค้ดพัง: ส่ง error กลับให้แก้ (สูงสุด 2 ครั้ง)
+        content, text = ask(msgs)
+        py.write_text(_extract_code(text) + "\n", "utf-8")
+        try:
+            _build_png(root, py, png)
+            break
+        except Exception as e:  # noqa: BLE001
+            last_err = str(e)
+            log(f"   โค้ดฉากพัง ให้ Claude แก้ (ครั้งที่ {attempt + 1})")
+            msgs += [{"role": "assistant", "content": content},
+                     {"role": "user", "content": f"รันแล้ว error:\n{e}\nส่งโค้ดทั้งไฟล์ที่แก้แล้ว"}]
+    else:
+        py.unlink(missing_ok=True)
+        png.unlink(missing_ok=True)
+        raise DramaError(f"Claude วาดฉากไม่สำเร็จ: {last_err[-300:]}")
+    if review:  # ให้ Claude ดูภาพที่ได้ 1 รอบ แล้วแก้ถ้าไม่ตรง
+        from PIL import Image
+        buf = io.BytesIO()
+        Image.open(png).convert("RGB").resize((540, 960)).save(buf, "JPEG", quality=80)
+        msgs += [{"role": "assistant", "content": content}, {"role": "user", "content": [
+            {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg",
+                                         "data": base64.b64encode(buf.getvalue()).decode()}},
+            {"type": "text", "text": "นี่คือภาพที่ได้ ตรงกับสถานที่ไหม (ของในฉาก แสง บรรยากาศ พื้นกลางว่าง) "
+                                     "ถ้าดีแล้วตอบคำเดียวว่า OK ถ้าควรแก้ ส่งโค้ดทั้งไฟล์ที่แก้แล้ว"}]}]
+        _c, text = ask(msgs)
+        if "def draw" in text:
+            old = py.read_text("utf-8")
+            py.write_text(_extract_code(text) + "\n", "utf-8")
             try:
                 _build_png(root, py, png)
-                ok = True
-                break
-            except Exception as e:  # noqa: BLE001
-                log(f"   โค้ดฉากพัง ให้ Claude แก้ (ครั้งที่ {attempt + 1})")
-                msgs += [{"role": "assistant", "content": content},
-                         {"role": "user", "content": f"รันแล้ว error:\n{e}\nส่งโค้ดทั้งไฟล์ที่แก้แล้ว"}]
-        if not ok:
-            py.unlink(missing_ok=True)
-            png.unlink(missing_ok=True)
-            log(f"   ⚠️ วาด {pl['id']} ไม่สำเร็จ ใช้ฉากสำเร็จรูปแทน")
+                log("   Claude ดูภาพแล้วปรับให้อีกรอบ")
+            except Exception:  # noqa: BLE001 — ฉบับแก้พัง ใช้ฉบับแรก
+                py.write_text(old, "utf-8")
+                _build_png(root, py, png)
+    log(f"   ✅ วาดเสร็จ รออนุมัติ: {place.get('name', place['id'])}")
+    return png
+
+
+def approve_candidate(pdir: Path, place: dict, lib_dir: Path, series_title: str = "") -> str:
+    """ใช้ฉากตัวเลือกกับซีรีส์นี้ + เก็บเข้าคลังฉาก คืน id ในคลัง"""
+    import secrets
+    import shutil
+    from datetime import datetime
+
+    py, png = cand_paths(pdir, place["id"])
+    if not (py.exists() and png.exists()):
+        raise DramaError("ยังไม่มีฉากที่รออนุมัติ")
+    ap = pdir / "bg" / "_approved"
+    ap.mkdir(parents=True, exist_ok=True)
+    shutil.copy(py, ap / f"{place['id']}.py")
+    shutil.copy(png, ap / f"{place['id']}.png")
+    lid = secrets.token_hex(5)
+    d = lib_dir / lid
+    d.mkdir(parents=True)
+    shutil.move(str(py), d / "draw.py")
+    shutil.move(str(png), d / "draw.png")
+    (d / "meta.json").write_text(json.dumps({
+        "id": lid, "name": place.get("name", place["id"]), "place": place, "series": series_title,
+        "createdAt": datetime.now().isoformat(timespec="seconds")}, ensure_ascii=False, indent=2), "utf-8")
+    return lid
+
+
+def discard_candidate(pdir: Path, pid: str) -> None:
+    for f in cand_paths(pdir, pid):
+        f.unlink(missing_ok=True)
+
+
+def library(lib_dir: Path) -> list[dict]:
+    if not lib_dir.exists():
+        return []
+    items = []
+    for d in lib_dir.iterdir():
+        m = d / "meta.json"
+        if m.exists() and (d / "draw.png").exists():
+            items.append(json.loads(m.read_text("utf-8")))
+    return sorted(items, key=lambda x: x["createdAt"], reverse=True)
+
+
+def delete_library_item(lib_dir: Path, lid: str) -> None:
+    import shutil
+    if re.fullmatch(r"[a-f0-9]{6,20}", lid or ""):
+        shutil.rmtree(lib_dir / lid, ignore_errors=True)
+
+
+def suggest_from_library(place: dict, lib: list[dict]) -> dict | None:
+    """หาฉากในคลังที่ชื่อ/คำบรรยายใกล้เคียงสถานที่นี้"""
+    import difflib
+
+    def text(p):
+        return f"{p.get('name', '')} {p.get('id', '')} {p.get('image_prompt', '')[:120]}".lower()
+
+    best, score = None, 0.0
+    for item in lib:
+        r = difflib.SequenceMatcher(None, text(place), text(item.get("place", {}))).ratio()
+        if r > score:
+            best, score = item, r
+    return best if score >= 0.55 else None
+
+
+def bg_status(pdir: Path, series: dict, choice: dict, lib_dir: Path) -> list[dict]:
+    """สถานะฉากของทุกสถานที่ที่บทใช้"""
+    used = used_place_ids(pdir)
+    lib = library(lib_dir)
+    out = []
+    for pl in series.get("places", []):
+        pid = pl.get("id")
+        if not pid or not re.fullmatch(r"[\w-]+", pid):
             continue
-        if review:  # ให้ Claude ดูภาพที่ได้ 1 รอบ แล้วแก้ถ้าไม่ตรง
-            from PIL import Image
-            buf = io.BytesIO()
-            Image.open(png).convert("RGB").resize((540, 960)).save(buf, "JPEG", quality=80)
-            msgs += [{"role": "assistant", "content": content}, {"role": "user", "content": [
-                {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg",
-                                             "data": base64.b64encode(buf.getvalue()).decode()}},
-                {"type": "text", "text": "นี่คือภาพที่ได้ ตรงกับสถานที่ไหม (ของในฉาก แสง บรรยากาศ พื้นกลางว่าง) "
-                                         "ถ้าดีแล้วตอบคำเดียวว่า OK ถ้าควรแก้ ส่งโค้ดทั้งไฟล์ที่แก้แล้ว"}]}]
-            _c, text = ask(msgs)
-            if "def draw" in text:
-                old = py.read_text("utf-8")
-                py.write_text(CLAUDE_MARK + "\n" + _extract_code(text) + "\n", "utf-8")
-                try:
-                    _build_png(root, py, png)
-                    log("   ปรับฉากหลังดูภาพแล้ว")
-                except Exception:  # noqa: BLE001 — ฉบับแก้พัง ใช้ฉบับแรก
-                    py.write_text(old, "utf-8")
-                    _build_png(root, py, png)
-        done.append(pl["id"])
-        log(f"   ✅ ได้ฉาก {pl.get('name', pl['id'])}")
-    return done
-
-
-def clear_claude_backgrounds(pdir: Path) -> int:
-    n = 0
-    for py in (pdir / "bg").glob("*.py"):
-        if py.read_text("utf-8").startswith(CLAUDE_MARK):
-            py.unlink()
-            py.with_suffix(".png").unlink(missing_ok=True)
-            n += 1
-    return n
+        key = choice.get(pid, "claude")
+        approved = pdir / "bg" / "_approved" / f"{pid}.png"
+        cand = cand_paths(pdir, pid)[1]
+        if key == "claude":
+            state = "approved" if approved.exists() else "missing"
+            preview = approved if approved.exists() else None
+        elif key.startswith("lib:"):
+            p = lib_dir / key[4:] / "draw.png"
+            state, preview = ("library", p) if p.exists() else ("missing", None)
+        else:
+            state, preview = "preset", None
+        out.append({"place": pl, "key": key, "state": state, "used": pid in used,
+                    "preview": str(preview) if preview else None,
+                    "cand": str(cand) if cand.exists() else None,
+                    "suggest": suggest_from_library(pl, lib) if state == "missing" else None})
+    return out
