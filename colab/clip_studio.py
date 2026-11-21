@@ -22,6 +22,7 @@ import requests
 from pydantic import BaseModel, Field
 
 import drama_adapter as D
+import viral_adapter as V
 
 DATA = Path(os.environ.get("CLIPSTUDIO_DIR", "clipstudio_data")).resolve()
 SKILLS = DATA / "skills"
@@ -159,6 +160,9 @@ def get_template(tid: str | None) -> dict | None:
 
 def _detect_type(root: Path) -> str:
     from drama_adapter import detect
+    import viral_adapter
+    if viral_adapter.detect(root):
+        return "viral"
     return "drama" if detect(root) else "files"
 
 
@@ -535,8 +539,9 @@ def render_project(p: dict, style: dict, progress=None) -> Path:
 
 
 # ---------------------------------------------------------------- UI helpers
-TYPE_ICON = {"simple": "📝", "drama": "🎭", "files": "📦"}
-TYPE_NAME = {"simple": "ข้อความ (บท+สี+ซับ)", "drama": "ละครการ์ตูน", "files": "โฟลเดอร์ (ยังไม่รองรับการเรนเดอร์)"}
+TYPE_ICON = {"simple": "📝", "drama": "🎭", "viral": "🎥", "files": "📦"}
+TYPE_NAME = {"simple": "ข้อความ (บท+สี+ซับ)", "drama": "ละครการ์ตูน", "viral": "คลิปไวรัลจากฟุตเทจจริง",
+             "files": "โฟลเดอร์ (ยังไม่รองรับการเรนเดอร์)"}
 
 
 def _skill_choices():
@@ -614,7 +619,7 @@ def build_app() -> gr.Blocks:
         def wrapped(*a, **k):
             try:
                 return fn(*a, **k)
-            except (UserError, D.DramaError) as e:
+            except (UserError, D.DramaError, V.ViralError) as e:
                 raise gr.Error(str(e), duration=None)
         return wrapped
 
@@ -767,6 +772,55 @@ def build_app() -> gr.Blocks:
                         d_img = gr.Image(label="ภาพตัวอย่าง", height=560, interactive=False)
                         d_video = gr.Video(label="คลิป", height=640)
                         d_log = gr.Textbox(label="บันทึกการทำงาน", lines=6, interactive=False)
+
+                with gr.Group(visible=False) as g_viral:
+                    gr.Markdown("### 🎥 คลิปไวรัลจากฟุตเทจจริง\n1) วางบท → 2) เสียงพากย์ → 3) ฟุตเทจ → 4) ตัดต่อ → 5) เรนเดอร์ "
+                                "(ได้คลิปมีเพลง/ไม่มีเพลง + ปก 2 แบบ + เครดิต)")
+                    v_pid = gr.State("")
+                    with gr.Row():
+                        v_proj = gr.Dropdown([], label="คลิป (ว่าง = สร้างใหม่ตอนบันทึกบท)", scale=3)
+                        v_name = gr.Textbox(label="ชื่อคลิป", placeholder="เช่น ละมั่งหนีจระเข้", scale=2)
+                        v_del = gr.Button("🗑️ ลบคลิป", variant="stop", scale=1)
+                    with gr.Accordion("1) บทพากย์", open=True):
+                        v_script = gr.Textbox(lines=12, label="วางบท (บรรทัดแรกเป็นแท็กเสียง [ผู้เล่า: ...] ได้ · บรรทัดสุดท้ายชวนกดไลค์)",
+                                              placeholder="[ผู้เล่า: เสียงผู้ชายวัยสามสิบ เล่าเรื่องตื่นเต้น จังหวะเร็ว]\nละมั่งตัวนี้ อยู่ห่างจากปากจระเข้ แค่ไม่กี่นิ้ว\n...")
+                        with gr.Row():
+                            v_sec = gr.Number(value=60, precision=0, label="ความยาวเป้าหมาย (วินาที)")
+                            v_save = gr.Button("💾 บันทึกบท", variant="primary")
+                        v_sinfo = gr.Markdown()
+                    with gr.Accordion("2) เสียงพากย์", open=True):
+                        with gr.Row():
+                            v_voice = gr.Dropdown(_voice_choices(V.DEFAULT_VOICE), value=V.DEFAULT_VOICE, allow_custom_value=True,
+                                                  label="เสียง ElevenLabs (ค่าเริ่มต้นตามเทมเพลต)")
+                            v_vmodel = gr.Dropdown(["eleven_v3", "eleven_v4", "eleven_multilingual_v2"], value="eleven_v3",
+                                                   label="โมเดลเสียง")
+                            v_tts = gr.Button("🎙️ สร้างเสียงจากบท")
+                        v_vofile = gr.File(file_types=["audio"], label="หรือลากไฟล์เสียงที่ทำเองมาวาง")
+                        v_audio = gr.Audio(label="เสียงที่ตัดช่วงเงียบแล้ว", interactive=False)
+                        v_vinfo = gr.Markdown()
+                    with gr.Accordion("3) ฟุตเทจ", open=True):
+                        with gr.Row():
+                            v_model = gr.Dropdown(list(MODELS.items()), value="claude-sonnet-5-5", label="โมเดล Claude")
+                            v_find = gr.Button("🔎 Claude หาฟุตเทจ + โหลดให้", variant="primary")
+                        v_upload = gr.File(file_count="multiple", file_types=["video"], label="หรืออัปโหลดคลิปเอง (ใช้เมื่อ YouTube บล็อก Colab)")
+                        v_flist = gr.Markdown()
+                        with gr.Row():
+                            v_rmname = gr.Dropdown([], label="ลบฟุตเทจ", scale=3)
+                            v_rm = gr.Button("🗑️ ลบไฟล์นี้", scale=1)
+                    with gr.Accordion("4) ตัดต่อ", open=True):
+                        with gr.Row():
+                            v_auto = gr.Button("✂️ ตัดอัตโนมัติ (ฟรี: ไม่มีวงกลม/ลูกศร)")
+                            v_ccut = gr.Button("🎬 Claude ตัดต่อเต็มสไตล์", variant="primary")
+                            v_review = gr.Checkbox(True, label="ให้ Claude ดูพรีวิวแล้วแก้อีกรอบ")
+                        v_preview = gr.Image(label="พรีวิว (ตรวจตัวชี้/ซับ ก่อนเรนเดอร์)", interactive=False)
+                    with gr.Accordion("5) เรนเดอร์", open=True):
+                        v_render = gr.Button("🎬 เรนเดอร์คลิป (~3-5 นาที)", variant="primary")
+                        with gr.Row():
+                            v_out1 = gr.Video(label="มีเพลง", height=560)
+                            v_out2 = gr.Video(label="ไม่มีเพลง", height=560)
+                        v_covers = gr.Gallery(label="ปก + contact sheet", columns=3, height=420)
+                        v_credits = gr.Textbox(label="เครดิตฟุตเทจ (ใส่ตอนโพสต์)", lines=5, interactive=False)
+                    v_log = gr.Textbox(label="บันทึกการทำงาน", lines=6, interactive=False)
 
             # ---------------- แก้บท / พากย์ / เรนเดอร์
             with gr.Tab("แก้บท (แบบข้อความ)", id="edit"):
@@ -1111,15 +1165,212 @@ def build_app() -> gr.Blocks:
 
         def on_template(tid):
             t = get_template(tid)
-            drama = bool(t and t["type"] == "drama")
+            kind = t["type"] if t else "simple"
             info = ""
-            if t and t["type"] == "files":
+            if kind == "files":
                 info = "⚠️ เทมเพลตนี้ยังไม่มีตัวเชื่อมสำหรับเรนเดอร์ ส่งให้ผู้พัฒนาเพิ่มรองรับก่อน"
-            ch = _drama_choices(tid) if drama else []
-            return (info, gr.update(visible=not drama), gr.update(visible=drama),
-                    gr.update(choices=ch, value=ch[0][1] if ch else None))
+            dch = _drama_choices(tid) if kind == "drama" else []
+            vch = _viral_choices(tid) if kind == "viral" else []
+            return (info, gr.update(visible=kind in ("simple", "files")), gr.update(visible=kind == "drama"),
+                    gr.update(visible=kind == "viral"),
+                    gr.update(choices=dch, value=dch[0][1] if dch else None),
+                    gr.update(choices=vch, value=vch[0][1] if vch else None))
 
-        c_skill.change(err(on_template), c_skill, [c_tinfo, g_simple, g_drama, d_proj])
+        c_skill.change(err(on_template), c_skill, [c_tinfo, g_simple, g_drama, g_viral, d_proj, v_proj])
+
+        # ===== events: viral
+        VSTATE = DATA / "viral_state"
+
+        def _viral_choices(tid=None):
+            ps = [p for p in list_projects("viral") if not tid or p.get("templateId") == tid]
+            return [(f"{p['title'][:50]} · {p['updatedAt'][5:16]}", p["id"]) for p in ps]
+
+        def _viral_root(pid_):
+            p = get_project(pid_)
+            t = get_template(p.get("templateId"))
+            if not t or t["type"] != "viral":
+                raise UserError("ไม่พบเทมเพลตของคลิปนี้ (ถูกลบไปแล้ว?)")
+            return p, template_root(t)
+
+        def _flist(pid_):
+            fl = V.footage_list(pdir(pid_))
+            if not fl:
+                return "_ยังไม่มีฟุตเทจ_", gr.update(choices=[], value=None)
+            md = "| ไฟล์ | ยาว | ขนาด |\n|---|---|---|\n" + "\n".join(f"| {f['name']} | {f['dur']} วิ | {f['size']} |" for f in fl)
+            total = sum(f["dur"] for f in fl)
+            return md + f"\n\nรวม {total:.0f} วิ (ควรมีมากกว่าความยาวคลิปพอสมควร เพราะห้ามใช้ภาพซ้ำ)", \
+                gr.update(choices=[f["name"] for f in fl], value=None)
+
+        def _vo_view(pid_):
+            d = pdir(pid_)
+            f = d / "vo-tight.wav"
+            if not f.exists():
+                return None, "_ยังไม่มีเสียง_"
+            dur = V._probe(f)
+            return str(f), f"✅ เสียงยาว {dur:.1f} วิ (ตัดช่วงเงียบแล้ว)"
+
+        def _outputs(pid_):
+            fin = pdir(pid_) / "final"
+            vids = sorted(str(x) for x in fin.glob("*.mp4") if "preview" not in x.name) if fin.exists() else []
+            withm = next((x for x in vids if "ไม่มีเพลง" not in x), None)
+            nom = next((x for x in vids if "ไม่มีเพลง" in x), None)
+            gal = (sorted(str(x) for x in fin.glob("ปก*.jpg")) + ([str(fin / "contact-sheet.jpg")] if (fin / "contact-sheet.jpg").exists() else [])) if fin.exists() else []
+            return withm, nom, gal
+
+        def v_load(pid_):
+            if not pid_:
+                return ("", "", "", None, "", "_ยังไม่มีฟุตเทจ_", gr.update(choices=[]), None, None, None, [], "")
+            p, root = _viral_root(pid_)
+            d = pdir(pid_)
+            script = (d / "script.txt").read_text("utf-8") if (d / "script.txt").exists() else ""
+            audio, vinfo = _vo_view(pid_)
+            fl, rmdd = _flist(pid_)
+            prev = d / "out" / "preview.jpg"
+            o1, o2, gal = _outputs(pid_)
+            cred = (d / "footage" / "credits.txt").read_text("utf-8") if (d / "footage" / "credits.txt").exists() else ""
+            return (pid_, p.get("title", ""), script, audio, vinfo, fl, rmdd, str(prev) if prev.exists() else None, o1, o2, gal, cred)
+
+        v_load_outs = [v_pid, v_name, v_script, v_audio, v_vinfo, v_flist, v_rmname, v_preview, v_out1, v_out2, v_covers, v_credits]
+        v_proj.change(err(v_load), v_proj, v_load_outs)
+
+        @err
+        def v_save_(tid, pid_, name, text, sec):
+            t = get_template(tid)
+            if not t or t["type"] != "viral":
+                raise UserError("เลือกเทมเพลตคลิปไวรัลก่อน")
+            if not pid_:
+                pid_ = _new_id()
+                p = {"id": pid_, "type": "viral", "templateId": tid, "createdAt": _now(), "title": (name or "คลิปใหม่").strip()}
+                save_project(p)
+                V.new_project(template_root(t), pdir(pid_), p["title"])
+            else:
+                p = get_project(pid_)
+                if name.strip():
+                    p["title"] = name.strip()
+            est = V.save_script(pdir(pid_), text)
+            p["target"] = int(sec or 60)
+            save_project(p)
+            msg = f"บันทึกแล้ว · บทยาวประมาณ **{est} วิ** (เป้า {int(sec or 60)} วิ)"
+            if abs(est - int(sec or 60)) > 8:
+                msg += " ⚠️ ความยาวห่างจากเป้า ลองเพิ่ม/ตัดบท"
+            return gr.update(choices=_viral_choices(tid), value=pid_), pid_, msg
+
+        v_save.click(v_save_, [c_skill, v_pid, v_name, v_script, v_sec], [v_proj, v_pid, v_sinfo])
+
+        def _after_vo(pid_, p, root):
+            dur, _out = V.vo_prep(root, pdir(pid_), p.get("target", 60))
+            if dur < p.get("target", 60) - 5:
+                gr.Warning(f"เสียงยาว {dur:.0f} วิ สั้นกว่าเป้า: เพิ่มบท 1-2 ประโยคแล้วทำเสียงใหม่")
+            return _vo_view(pid_)
+
+        @err
+        def v_tts_(pid_, voice, vmodel, progress=gr.Progress()):
+            if not pid_:
+                raise UserError("บันทึกบทก่อน")
+            p, root = _viral_root(pid_)
+            progress(0.2, desc="ElevenLabs กำลังสร้างเสียง")
+            V.tts(root, pdir(pid_), voice or V.DEFAULT_VOICE, vmodel)
+            progress(0.8, desc="ตัดช่วงเงียบ + จับเวลาซับ")
+            return _after_vo(pid_, p, root)
+
+        v_tts.click(v_tts_, [v_pid, v_voice, v_vmodel], [v_audio, v_vinfo])
+
+        @err
+        def v_vofile_(pid_, f):
+            if not pid_:
+                raise UserError("บันทึกบทก่อน")
+            if not f:
+                return gr.update(), gr.update()
+            p, root = _viral_root(pid_)
+            V.import_voice(pdir(pid_), f if isinstance(f, str) else f.name)
+            return _after_vo(pid_, p, root)
+
+        v_vofile.upload(v_vofile_, [v_pid, v_vofile], [v_audio, v_vinfo])
+
+        @err
+        def v_find_(pid_, model, progress=gr.Progress()):
+            if not pid_:
+                raise UserError("บันทึกบทก่อน")
+            p, root = _viral_root(pid_)
+            log = []
+            got = V.claude_find_footage(root, pdir(pid_), model, lambda m: (log.append(m), progress(0.5, desc=m[:60])))
+            log += [f"✅ {g['name']}: {g['title'][:60]} ({g.get('why', '')})" for g in got]
+            fl, rmdd = _flist(pid_)
+            return fl, rmdd, V.credits(root, pdir(pid_), p.get("title", "")), "\n".join(log)
+
+        v_find.click(v_find_, [v_pid, v_model], [v_flist, v_rmname, v_credits, v_log])
+
+        @err
+        def v_upload_(pid_, files, progress=gr.Progress()):
+            if not pid_:
+                raise UserError("บันทึกบทก่อน")
+            p, root = _viral_root(pid_)
+            for k, f in enumerate(files or []):
+                progress(k / max(1, len(files)), desc="แปลงไฟล์วิดีโอ")
+                V.add_footage_file(pdir(pid_), f if isinstance(f, str) else f.name)
+            fl, rmdd = _flist(pid_)
+            return fl, rmdd, V.credits(root, pdir(pid_), p.get("title", "")), None
+
+        v_upload.upload(v_upload_, [v_pid, v_upload], [v_flist, v_rmname, v_credits, v_upload])
+
+        @err
+        def v_rm_(pid_, name):
+            if pid_ and name:
+                V.remove_footage(pdir(pid_), name)
+            return _flist(pid_) if pid_ else ("", gr.update())
+
+        v_rm.click(v_rm_, [v_pid, v_rmname], [v_flist, v_rmname])
+
+        @err
+        def v_auto_(pid_, progress=gr.Progress()):
+            if not pid_:
+                raise UserError("บันทึกบทก่อน")
+            p, root = _viral_root(pid_)
+            progress(0.1, desc="จัดช็อตตามเสียง")
+            V.auto_cut(pdir(pid_), root)
+            progress(0.3, desc="สร้าง footage.mp4")
+            out = V.build(root, pdir(pid_), VSTATE)
+            V.default_covers(pdir(pid_))
+            progress(0.9, desc="พรีวิว")
+            return str(V.preview(root, pdir(pid_), VSTATE, "0.3,15,30")), out.strip().splitlines()[-1] if out.strip() else ""
+
+        v_auto.click(v_auto_, v_pid, [v_preview, v_log])
+
+        @err
+        def v_ccut_(pid_, model, review, progress=gr.Progress()):
+            if not pid_:
+                raise UserError("บันทึกบทก่อน")
+            p, root = _viral_root(pid_)
+            log = []
+            V.claude_cut(root, pdir(pid_), model, VSTATE, review, lambda m: (log.append(m), progress(0.5, desc=m[:60])))
+            prev = V.preview(root, pdir(pid_), VSTATE, "0,0.25,0.5,15,30")
+            gr.Info("Claude ตัดต่อเสร็จ ดูพรีวิวก่อนเรนเดอร์")
+            return str(prev), "\n".join(log)
+
+        v_ccut.click(v_ccut_, [v_pid, v_model, v_review], [v_preview, v_log])
+
+        @err
+        def v_render_(pid_, progress=gr.Progress()):
+            if not pid_:
+                raise UserError("บันทึกบทก่อน")
+            p, root = _viral_root(pid_)
+            log = []
+            progress(0.05, desc="เรนเดอร์ภาพ + เสียงประกอบ")
+            V.render(root, pdir(pid_), VSTATE, lambda m: (log.append(m), progress(0.5, desc=m[:60])))
+            o1, o2, gal = _outputs(pid_)
+            # ชื่อไฟล์ใหม่กัน browser cache
+            gr.Info("เรนเดอร์เสร็จ 🎉")
+            return o1, o2, gal, V.credits(root, pdir(pid_), p.get("title", "")), "\n".join(log[-40:])
+
+        v_render.click(v_render_, v_pid, [v_out1, v_out2, v_covers, v_credits, v_log])
+
+        @err
+        def v_del_(pid_, tid):
+            if pid_:
+                shutil.rmtree(pdir(pid_), ignore_errors=True)
+            return gr.update(choices=_viral_choices(tid), value=None), ""
+
+        v_del.click(v_del_, [v_pid, c_skill], [v_proj, v_pid])
 
         def _drama_template(pid_):
             p = get_project(pid_)

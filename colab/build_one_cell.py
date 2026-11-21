@@ -8,7 +8,7 @@ import tarfile
 from pathlib import Path
 
 HERE = Path(__file__).parent
-MODULES = ["drama_adapter.py", "drama_runner.py", "clip_studio.py"]
+MODULES = ["drama_adapter.py", "drama_runner.py", "viral_adapter.py", "clip_studio.py"]
 
 buf = io.BytesIO()
 with tarfile.open(fileobj=buf, mode="w:gz") as tar:
@@ -24,7 +24,7 @@ import base64, io, os, subprocess, sys, tarfile
 print("⏳ ติดตั้งโปรแกรม...")
 subprocess.run("apt-get -qq install -y fonts-thai-tlwg > /dev/null 2>&1", shell=True)
 subprocess.run([sys.executable, "-m", "pip", "-q", "install", "gradio==6.32.0", "anthropic==2.12.0", "pythainlp",
-                "edge-tts", "uharfbuzz", "freetype-py", "opencv-python-headless"], check=True)
+                "edge-tts", "uharfbuzz", "freetype-py", "opencv-python-headless", "yt-dlp"], check=True)
 
 from google.colab import drive, userdata
 drive.mount("/content/drive")

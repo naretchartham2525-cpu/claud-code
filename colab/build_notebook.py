@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 
 HERE = Path(__file__).parent
-MODULES = ["drama_adapter.py", "drama_runner.py", "clip_studio.py"]  # ฝังทุกไฟล์ลง notebook
+MODULES = ["drama_adapter.py", "drama_runner.py", "viral_adapter.py", "clip_studio.py"]  # ฝังทุกไฟล์ลง notebook
 
 
 def md(src):
@@ -26,7 +26,7 @@ cells = [
        "**เพิ่มเทมเพลต:** แท็บ *เทมเพลต* → ลากไฟล์ .zip ของสกิลมาวาง"),
     py("#@title 1. ติดตั้ง + เชื่อม Google Drive\n"
        "!apt-get -qq install -y fonts-thai-tlwg > /dev/null\n"
-       "!pip -q install gradio==6.32.0 anthropic==2.12.0 pythainlp edge-tts uharfbuzz freetype-py opencv-python-headless\n"
+       "!pip -q install gradio==6.32.0 anthropic==2.12.0 pythainlp edge-tts uharfbuzz freetype-py opencv-python-headless yt-dlp\n"
        "import os\n"
        "from google.colab import drive, userdata\n"
        "drive.mount('/content/drive')\n"
