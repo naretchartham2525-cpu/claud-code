@@ -32,4 +32,12 @@ node --env-file=.env server.js
 3. Runtime → Run all แล้วกดลิงก์ `gradio.live`
 
 ข้อมูลเก็บใน Google Drive `MyDrive/ClipStudio` ไม่หายตอนปิด Colab
+
+### เทมเพลต
+
+แท็บ **เทมเพลต** → ลาก `.zip` ของสกิลมาวาง เว็บตรวจชนิดให้เอง
+- 🎭 **ละครการ์ตูน** (มี `scripts/render_ep.py` + `engine/`): วาง `series.json` + `epNN.json` → ตรวจบท → เลือกเสียง (edge-tts ฟรี หรือ ElevenLabs แยกตามตัวละคร) + ฉากสำเร็จรูป → ภาพตัวอย่าง → เรนเดอร์ ไม่แก้ไฟล์เทมเพลต
+- 📝 **ข้อความ** (.md/.txt หรือ zip ที่ไม่มีโค้ด): สไตล์บท + สี/ซับ ใช้กับโหมดบทแบบเดิม
+
+ไฟล์เทมเพลตที่มีลิขสิทธิ์ห้ามแจกจ่าย จึงไม่ได้ใส่ไว้ใน repo นี้ ต้องอัปเข้าเว็บเอง
 แก้โค้ดที่ `colab/clip_studio.py` แล้วรัน `python colab/build_notebook.py` เพื่อสร้าง notebook ใหม่

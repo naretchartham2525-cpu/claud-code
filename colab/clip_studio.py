@@ -21,6 +21,8 @@ import gradio as gr
 import requests
 from pydantic import BaseModel, Field
 
+import drama_adapter as D
+
 DATA = Path(os.environ.get("CLIPSTUDIO_DIR", "clipstudio_data")).resolve()
 SKILLS = DATA / "skills"
 PROJECTS = DATA / "projects"
@@ -112,13 +114,171 @@ def import_skill_file(path: str) -> dict:
     return save_skill(None, name, desc, text, "9:16", "#111827", "#FFFFFF", "")
 
 
+# ---------------------------------------------------------------- templates (zip)
+# เทมเพลตแบบโฟลเดอร์/zip (มีโค้ด+ไฟล์ประกอบ) เก็บที่ templates/<id>/files/ + meta.json
+# เทมเพลตแบบข้อความล้วน ใช้ระบบ skills/*.json ด้านบน (type "simple")
+TEMPLATES = DATA / "templates"
+TEMPLATES.mkdir(parents=True, exist_ok=True)
+
+
+def _frontmatter(text: str) -> tuple[str, str, str]:
+    """คืน (name, description, เนื้อหาที่ตัด frontmatter แล้ว)"""
+    m = re.match(r"^---\r?\n(.*?)\r?\n---\r?\n?", text, re.S)
+    if not m:
+        return "", "", text
+    fm = m.group(1)
+    n = re.search(r"^name:\s*(.+)$", fm, re.M)
+    d = re.search(r"^description:\s*(.+)$", fm, re.M)
+    strip = lambda x: x.group(1).strip().strip("\"'") if x else ""  # noqa: E731
+    return strip(n), strip(d), text[m.end():]
+
+
+def tdir(tid: str) -> Path:
+    return TEMPLATES / _safe(tid)
+
+
+def template_root(t: dict) -> Path:
+    return tdir(t["id"]) / "files" / t.get("root", "")
+
+
+def list_templates() -> list[dict]:
+    """รวมเทมเพลตทุกแบบ (simple + โฟลเดอร์)"""
+    items = [{**s, "type": "simple"} for s in list_skills()]
+    items += [m for m in (_read(d / "meta.json") for d in TEMPLATES.iterdir() if d.is_dir()) if m]
+    return sorted(items, key=lambda t: t["updatedAt"], reverse=True)
+
+
+def get_template(tid: str | None) -> dict | None:
+    if not tid:
+        return None
+    s = get_skill(tid)
+    if s:
+        return {**s, "type": "simple"}
+    return _read(tdir(tid) / "meta.json")
+
+
+def _detect_type(root: Path) -> str:
+    from drama_adapter import detect
+    return "drama" if detect(root) else "files"
+
+
+def _safe_extract(zip_path: str, dest: Path) -> None:
+    import zipfile
+    with zipfile.ZipFile(zip_path) as z:
+        for info in z.infolist():
+            name = info.filename
+            # ชื่อไฟล์ไทยใน zip บางตัว encode เป็น cp437
+            if not info.flag_bits & 0x800:
+                try:
+                    name = name.encode("cp437").decode("utf-8")
+                except (UnicodeEncodeError, UnicodeDecodeError):
+                    pass
+            target = (dest / name).resolve()
+            if not str(target).startswith(str(dest.resolve())) or "__MACOSX" in name:
+                continue  # กัน zip-slip และไฟล์ขยะของ macOS
+            if info.is_dir():
+                target.mkdir(parents=True, exist_ok=True)
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with z.open(info) as src, open(target, "wb") as out:
+                shutil.copyfileobj(src, out)
+
+
+def _find_root(files: Path) -> Path:
+    """โฟลเดอร์ที่มี SKILL.md ตื้นที่สุด หรือโฟลเดอร์ชั้นเดียวที่ห่ออยู่"""
+    cands = sorted(files.rglob("SKILL.md"), key=lambda p: len(p.parts))
+    if cands:
+        return cands[0].parent
+    kids = [p for p in files.iterdir() if not p.name.startswith(".")]
+    return kids[0] if len(kids) == 1 and kids[0].is_dir() else files
+
+
+def import_template_zip(path: str) -> dict:
+    tid = _new_id()
+    d = tdir(tid)
+    files = d / "files"
+    files.mkdir(parents=True)
+    try:
+        _safe_extract(path, files)
+    except Exception as e:  # noqa: BLE001
+        shutil.rmtree(d, ignore_errors=True)
+        raise UserError(f"แตกไฟล์ zip ไม่ได้: {e}")
+    root = _find_root(files)
+    skill_md = root / "SKILL.md"
+    name, desc, body = _frontmatter(skill_md.read_text("utf-8", errors="replace")) if skill_md.exists() else ("", "", "")
+    ttype = _detect_type(root)
+    if ttype == "files" and not any(root.rglob("*.py")):
+        # มีแค่ข้อความ: เก็บเป็นเทมเพลตแบบ simple ให้แก้ในฟอร์มได้
+        shutil.rmtree(d, ignore_errors=True)
+        return save_skill(None, name or Path(path).stem, desc, body or "(ว่าง)", "9:16", "#111827", "#FFFFFF", "")
+    meta = {"id": tid, "type": ttype, "name": name or Path(path).stem, "description": desc,
+            "root": str(root.relative_to(files)) if root != files else "", "createdAt": _now(), "updatedAt": _now()}
+    _write(d / "meta.json", meta)
+    return meta
+
+
+def import_template_file(path: str) -> dict:
+    if path.lower().endswith(".zip"):
+        return import_template_zip(path)
+    name, desc, body = _frontmatter(Path(path).read_text("utf-8", errors="replace"))
+    return save_skill(None, name or Path(path).stem, desc, body, "9:16", "#111827", "#FFFFFF", "")
+
+
+def add_template_files(tid: str, paths: list[str]) -> dict:
+    t = get_template(tid)
+    if not t or t["type"] == "simple":
+        raise UserError("เพิ่มไฟล์ได้เฉพาะเทมเพลตแบบโฟลเดอร์ (zip)")
+    root = template_root(t)
+    for p in paths:
+        if p.lower().endswith(".zip"):
+            _safe_extract(p, root)
+        else:
+            shutil.copy(p, root / Path(p).name)
+    t["updatedAt"] = _now()
+    _write(tdir(tid) / "meta.json", t)
+    return t
+
+
+def duplicate_template(tid: str) -> dict:
+    t = get_template(tid)
+    if not t:
+        raise UserError("ไม่พบเทมเพลต")
+    if t["type"] == "simple":
+        st = t["style"]
+        return save_skill(None, t["name"] + " (สำเนา)", t.get("description", ""), t["content"],
+                          st["aspect"], st["bgColor"], st["textColor"], st.get("voiceId", ""))
+    nid = _new_id()
+    shutil.copytree(tdir(tid), tdir(nid))
+    meta = {**t, "id": nid, "name": t["name"] + " (สำเนา)", "createdAt": _now(), "updatedAt": _now()}
+    _write(tdir(nid) / "meta.json", meta)
+    return meta
+
+
+def delete_template(tid: str) -> None:
+    (SKILLS / f"{_safe(tid)}.json").unlink(missing_ok=True)
+    shutil.rmtree(tdir(tid), ignore_errors=True)
+
+
+def export_template(tid: str) -> str:
+    t = get_template(tid)
+    if not t:
+        raise UserError("ไม่พบเทมเพลต")
+    out = Path("/tmp") / f"template_{tid}"
+    if t["type"] == "simple":
+        out.mkdir(exist_ok=True)
+        (out / "SKILL.md").write_text(f"---\nname: {t['name']}\ndescription: {t.get('description', '')}\n---\n{t['content']}", "utf-8")
+        return shutil.make_archive(str(out), "zip", out)
+    return shutil.make_archive(str(out), "zip", tdir(tid) / "files")
+
+
 def pdir(pid: str) -> Path:
     return PROJECTS / _safe(pid)
 
 
-def list_projects() -> list[dict]:
+def list_projects(kind: str = "simple") -> list[dict]:
     items = [_read(d / "project.json") for d in PROJECTS.iterdir() if d.is_dir()]
-    return sorted([p for p in items if p], key=lambda p: p["updatedAt"], reverse=True)
+    items = [p for p in items if p and p.get("type", "simple") == kind]
+    return sorted(items, key=lambda p: p["updatedAt"], reverse=True)
 
 
 def get_project(pid: str) -> dict:
@@ -375,12 +535,26 @@ def render_project(p: dict, style: dict, progress=None) -> Path:
 
 
 # ---------------------------------------------------------------- UI helpers
+TYPE_ICON = {"simple": "📝", "drama": "🎭", "files": "📦"}
+TYPE_NAME = {"simple": "ข้อความ (บท+สี+ซับ)", "drama": "ละครการ์ตูน", "files": "โฟลเดอร์ (ยังไม่รองรับการเรนเดอร์)"}
+
+
 def _skill_choices():
-    return [("(ไม่ใช้สกิล)", "")] + [(s["name"], s["id"]) for s in list_skills()]
+    """เฉพาะเทมเพลตข้อความ (ใช้กับโปรเจกต์แบบบท/ฉาก)"""
+    return [("(ไม่ใช้เทมเพลต)", "")] + [(s["name"], s["id"]) for s in list_skills()]
+
+
+def _template_choices():
+    return [(f"{TYPE_ICON.get(t['type'], '📦')} {t['name']}", t["id"]) for t in list_templates()]
+
+
+def _drama_choices(tid=None):
+    ps = [p for p in list_projects("drama") if not tid or p.get("templateId") == tid]
+    return [(f"{p['title'][:50]} · {p['updatedAt'][5:16]}", p["id"]) for p in ps]
 
 
 def _project_choices():
-    return [(f"{p['title'][:50]} · {len(p['scenes'])} ฉาก · {p['updatedAt'][5:16]}", p["id"]) for p in list_projects()]
+    return [(f"{p['title'][:50]} · {len(p['scenes'])} ฉาก · {p['updatedAt'][5:16]}", p["id"]) for p in list_projects("simple")]
 
 
 _voice_cache: list[tuple[str, str]] = []
@@ -437,40 +611,108 @@ def build_app() -> gr.Blocks:
         def wrapped(*a, **k):
             try:
                 return fn(*a, **k)
-            except UserError as e:
+            except (UserError, D.DramaError) as e:
                 raise gr.Error(str(e), duration=None)
         wrapped.__name__ = fn.__name__
         return wrapped
 
     with gr.Blocks(title="Clip Studio") as app:
-        gr.Markdown("# 🎬 Clip Studio\nสกิล → บท → พากย์ ElevenLabs → คลิป MP4")
+        gr.Markdown("# 🎬 Clip Studio\nเทมเพลต → บท → เสียงพากย์ → คลิป MP4")
         pid = gr.State("")
 
         with gr.Tabs() as tabs:
             # ---------------- สร้างคลิป
             with gr.Tab("สร้างคลิป", id="create"):
-                c_skill = gr.Dropdown(_skill_choices(), value="", label="สกิล / สไตล์")
-                c_mode = gr.Radio(
-                    [("ให้ Claude คิดเนื้อเรื่อง", "ai"), ("วางบทเอง (Claude แบ่งฉาก)", "own-ai"),
-                     ("วางบทเอง (ย่อหน้าละฉาก ไม่ใช้ AI ฟรี)", "own")],
-                    value="ai", label="ที่มาของบท")
-                c_model = gr.Dropdown(list(MODELS.items()), value="claude-sonnet-5-5", label="โมเดล Claude")
-                with gr.Group(visible=True) as g_ai:
-                    c_topic = gr.Textbox(label="หัวข้อ / ไอเดีย", placeholder="เช่น ตำนานผีบ้านร้างริมคลอง")
-                    c_dur = gr.Slider(15, 300, value=60, step=5, label="ความยาว (วินาที)")
-                    c_extra = gr.Textbox(label="เพิ่มเติม (ไม่บังคับ)", lines=2)
-                c_script = gr.Textbox(label="วางบท (เว้นบรรทัดว่างระหว่างฉาก)", lines=12, visible=False)
-                c_go = gr.Button("สร้างบท →", variant="primary")
+                with gr.Row():
+                    c_skill = gr.Dropdown([("(ไม่ใช้เทมเพลต)", "")] + _template_choices(), value="",
+                                          label="เทมเพลต (เปลี่ยนแนวคลิปได้ที่นี่)", scale=4)
+                    c_tinfo = gr.Markdown()
+                with gr.Group(visible=True) as g_simple:
+                    c_mode = gr.Radio(
+                        [("ให้ Claude คิดเนื้อเรื่อง", "ai"), ("วางบทเอง (Claude แบ่งฉาก)", "own-ai"),
+                         ("วางบทเอง (ย่อหน้าละฉาก ไม่ใช้ AI ฟรี)", "own")],
+                        value="ai", label="ที่มาของบท")
+                    c_model = gr.Dropdown(list(MODELS.items()), value="claude-sonnet-5-5", label="โมเดล Claude")
+                    with gr.Group(visible=True) as g_ai:
+                        c_topic = gr.Textbox(label="หัวข้อ / ไอเดีย", placeholder="เช่น ตำนานผีบ้านร้างริมคลอง")
+                        c_dur = gr.Slider(15, 300, value=60, step=5, label="ความยาว (วินาที)")
+                        c_extra = gr.Textbox(label="เพิ่มเติม (ไม่บังคับ)", lines=2)
+                    c_script = gr.Textbox(label="วางบท (เว้นบรรทัดว่างระหว่างฉาก)", lines=12, visible=False)
+                    c_go = gr.Button("สร้างบท →", variant="primary")
+
+                with gr.Group(visible=False) as g_drama:
+                    gr.Markdown("### 🎭 ละครการ์ตูน\n1) วาง series.json → 2) วางบทตอน epNN.json → 3) ตรวจบท → "
+                                "4) เลือกเสียง/ฉาก → 5) ดูภาพตัวอย่าง → 6) เรนเดอร์")
+                    d_pid = gr.State("")
+                    with gr.Row():
+                        d_proj = gr.Dropdown([], label="ซีรีส์ (ว่าง = สร้างใหม่จาก series.json)", scale=4)
+                        d_del = gr.Button("🗑️ ลบซีรีส์", variant="stop", scale=1)
+                    with gr.Accordion("1) series.json (ตัวละคร / สถานที่)", open=True) as d_acc_series:
+                        d_series = gr.Code(language="json", label="วาง series.json", lines=10, max_lines=18)
+                        d_series_file = gr.File(file_types=[".json"], label="หรือลากไฟล์ series.json มาวาง")
+                        d_save_series = gr.Button("💾 บันทึก series.json")
+                    with gr.Accordion("2) บทตอน epNN.json", open=True):
+                        d_ep_text = gr.Code(language="json", label="วางบทตอน (epNN.json)", lines=10, max_lines=18)
+                        d_ep_file = gr.File(file_types=[".json"], label="หรือลากไฟล์ epNN.json มาวาง")
+                        with gr.Row():
+                            d_save_ep = gr.Button("💾 บันทึกตอน")
+                            d_ep = gr.Dropdown([], label="ตอนที่จะทำ", scale=2)
+                            d_sec = gr.Number(value=90, precision=0, label="ความยาวเป้าหมาย (วินาที)")
+                            d_check = gr.Button("✅ ตรวจบท")
+                        d_check_out = gr.Textbox(label="ผลตรวจบท", lines=6, interactive=False)
+                    with gr.Accordion("3) เสียงพากย์ & ฉากหลัง", open=True):
+                        with gr.Row():
+                            d_engine = gr.Radio([("edge-tts (ฟรี)", "edge"), ("ElevenLabs", "eleven")], value="edge",
+                                                label="เสียงพากย์")
+                            d_emodel = gr.Dropdown(ELEVEN_MODELS, value="eleven_v3", label="โมเดล ElevenLabs")
+                        d_refresh = gr.State(0)
+
+                        @gr.render(inputs=[d_pid, d_engine, d_refresh])
+                        def _dynamic(pid_, engine, _r):
+                            if not pid_ or not (pdir(pid_) / "series.json").exists():
+                                gr.Markdown("_บันทึก series.json ก่อน แล้วช่องเลือกเสียง/ฉากจะขึ้นที่นี่_")
+                                return
+                            p = get_project(pid_)
+                            series = D.load(pdir(pid_), "series.json")
+                            if engine == "eleven":
+                                gr.Markdown("**เสียง ElevenLabs ของแต่ละตัวละคร** (ว่าง = ใช้เสียงเริ่มต้น / เสียงผู้เล่า)")
+                                vm = p.get("voices", {}).get("map", {})
+                                with gr.Row():
+                                    for cid, name, vt in [("_default", "เสียงเริ่มต้น", "")] + D.voice_slots(series):
+                                        cur = p.get("voices", {}).get("default", "") if cid == "_default" else vm.get(cid, "")
+                                        dd = gr.Dropdown(_voice_choices(cur), value=cur, allow_custom_value=True,
+                                                         label=f"{name}" + (f" ({vt})" if vt else ""), min_width=180)
+                                        dd.change(err(lambda v, cid=cid: _set_voice(pid_, cid, v)), dd, None)
+                            else:
+                                gr.Markdown("_edge-tts ใช้เสียงไทยของ Microsoft ตามประเภทเสียงใน series.json (ฟรี ต้องมีอินเทอร์เน็ต)_")
+                            gr.Markdown("**ฉากหลังของแต่ละสถานที่** (ฉากสำเร็จรูป)")
+                            bgs = p.get("bgs", {})
+                            with gr.Row():
+                                for pl in series.get("places", []):
+                                    if "id" not in pl:
+                                        continue
+                                    dd = gr.Dropdown([(v, k) for k, v in D.PRESETS.items()], value=bgs.get(pl["id"], "auto"),
+                                                     label=pl.get("name", pl["id"]), min_width=180)
+                                    dd.change(err(lambda v, pid2=pl["id"]: _set_bg(pid_, pid2, v)), dd, None)
+                    with gr.Accordion("4) ภาพตัวอย่าง & เรนเดอร์", open=True):
+                        with gr.Row():
+                            d_still_n = gr.Number(value=1, precision=0, minimum=1, label="ช็อตที่")
+                            d_still = gr.Button("🖼️ ดูภาพตัวอย่างช็อตนี้")
+                            d_render = gr.Button("🎬 เรนเดอร์ทั้งตอน", variant="primary")
+                            d_force = gr.Checkbox(False, label="เรนเดอร์แม้บทยังไม่ผ่านการตรวจ (ทดลอง)")
+                        d_img = gr.Image(label="ภาพตัวอย่าง", height=560, interactive=False)
+                        d_video = gr.Video(label="คลิป", height=640)
+                        d_log = gr.Textbox(label="บันทึกการทำงาน", lines=6, interactive=False)
 
             # ---------------- แก้บท / พากย์ / เรนเดอร์
-            with gr.Tab("แก้บท & เรนเดอร์", id="edit"):
+            with gr.Tab("แก้บท (แบบข้อความ)", id="edit"):
                 with gr.Row():
                     e_proj = gr.Dropdown(_project_choices(), label="โปรเจกต์", scale=4)
                     e_reload = gr.Button("🔄", scale=0, min_width=50)
                     e_del = gr.Button("🗑️ ลบโปรเจกต์", variant="stop", scale=1)
                 e_title = gr.Textbox(label="ชื่อคลิป")
                 with gr.Row():
-                    e_skill = gr.Dropdown(_skill_choices(), label="สกิล (ใช้สไตล์ภาพ/ซับ)")
+                    e_skill = gr.Dropdown(_skill_choices(), label="เทมเพลต (สี/ซับ/สัดส่วน)")
                     e_voice = gr.Dropdown(_voice_choices(), label="เสียงพากย์", allow_custom_value=True)
                     e_emodel = gr.Dropdown(ELEVEN_MODELS, value="eleven_v3", label="โมเดลเสียง")
                 e_table = gr.Dataframe(headers=["บทพากย์", "ข้อความบนจอ (ว่าง=ใช้บทพากย์)", "ภาพที่ควรใช้"],
@@ -492,22 +734,29 @@ def build_app() -> gr.Blocks:
                             e_rmimg = gr.Button("ลบภาพ")
                 e_video = gr.Video(label="คลิป", height=640)
 
-            # ---------------- สกิล
-            with gr.Tab("สกิล", id="skills"):
-                s_files = gr.File(file_count="multiple", file_types=[".md", ".txt", ".markdown"],
-                                  label="อัปโหลดไฟล์สกิล (.md/.txt, รองรับ SKILL.md)")
-                s_pick = gr.Dropdown(_skill_choices(), label="เลือกสกิลเพื่อแก้ไข (ว่าง = เพิ่มใหม่)")
-                s_name = gr.Textbox(label="ชื่อสกิล")
-                s_desc = gr.Textbox(label="คำอธิบายสั้นๆ")
-                s_content = gr.Textbox(label="คำสั่ง/สไตล์ให้ Claude ทำตาม", lines=12)
+            # ---------------- เทมเพลต
+            with gr.Tab("เทมเพลต", id="skills"):
+                s_files = gr.File(file_count="multiple", file_types=[".zip", ".md", ".txt", ".markdown"],
+                                  label="➕ เพิ่มเทมเพลต: ลาก .zip (ทั้งโฟลเดอร์สกิล) หรือ .md/.txt มาวาง ได้หลายไฟล์")
+                s_pick = gr.Dropdown(_template_choices(), label="เลือกเทมเพลต (ว่าง = สร้างเทมเพลตข้อความใหม่)")
+                s_info = gr.Markdown()
                 with gr.Row():
-                    s_aspect = gr.Dropdown(list(SIZES), value="9:16", label="สัดส่วนคลิป")
-                    s_bg = gr.ColorPicker("#111827", label="สีพื้น")
-                    s_fg = gr.ColorPicker("#FFFFFF", label="สีซับ")
-                    s_voice = gr.Dropdown(_voice_choices(), value="", label="เสียงพากย์", allow_custom_value=True)
-                with gr.Row():
-                    s_save = gr.Button("💾 บันทึกสกิล", variant="primary")
-                    s_del = gr.Button("🗑️ ลบสกิล", variant="stop")
+                    s_dup = gr.Button("📄 ทำสำเนา")
+                    s_export = gr.Button("⬇️ ดาวน์โหลด .zip")
+                    s_del = gr.Button("🗑️ ลบเทมเพลต", variant="stop")
+                s_zip = gr.File(label="ไฟล์ดาวน์โหลด", visible=False)
+                with gr.Group(visible=False) as g_tfiles:
+                    s_add = gr.File(file_count="multiple", label="เพิ่ม/แทนที่ไฟล์ในเทมเพลตนี้ (ไฟล์เดี่ยวหรือ .zip)")
+                with gr.Group(visible=True) as g_tform:
+                    s_name = gr.Textbox(label="ชื่อเทมเพลต")
+                    s_desc = gr.Textbox(label="คำอธิบายสั้นๆ")
+                    s_content = gr.Textbox(label="คำสั่ง/สไตล์ให้ Claude ทำตาม", lines=12)
+                    with gr.Row():
+                        s_aspect = gr.Dropdown(list(SIZES), value="9:16", label="สัดส่วนคลิป")
+                        s_bg = gr.ColorPicker("#111827", label="สีพื้น")
+                        s_fg = gr.ColorPicker("#FFFFFF", label="สีซับ")
+                        s_voice = gr.Dropdown(_voice_choices(), value="", label="เสียงพากย์", allow_custom_value=True)
+                    s_save = gr.Button("💾 บันทึกเทมเพลต", variant="primary")
 
             # ---------------- ตั้งค่า
             with gr.Tab("ตั้งค่า", id="settings"):
@@ -690,46 +939,255 @@ def build_app() -> gr.Blocks:
 
         e_del.click(del_project, pid, e_proj)
 
-        # ===== events: skills
+        # ===== events: templates
+        def _tinfo(t):
+            if not t:
+                return ""
+            txt = f"**{TYPE_ICON.get(t['type'], '📦')} {t['name']}** · {TYPE_NAME.get(t['type'], t['type'])}"
+            if t.get("description"):
+                txt += f"\n\n{t['description'][:300]}"
+            if t["type"] != "simple":
+                root = template_root(t)
+                n = sum(1 for _ in root.rglob("*") if _.is_file())
+                txt += f"\n\n📁 {n} ไฟล์ · `{root.relative_to(DATA)}`"
+            return txt
+
         def skill_form(sid):
-            s = get_skill(sid) if sid else None
-            if not s:
-                return "", "", "", "9:16", "#111827", "#FFFFFF", gr.update(choices=_voice_choices(), value="")
-            st = s["style"]
-            return (s["name"], s.get("description", ""), s["content"], st["aspect"], st["bgColor"], st["textColor"],
-                    gr.update(choices=_voice_choices(st.get("voiceId", "")), value=st.get("voiceId", "")))
+            t = get_template(sid) if sid else None
+            simple = not t or t["type"] == "simple"
+            vis = (gr.update(visible=not simple), gr.update(visible=simple))
+            if not t or not simple:
+                return (_tinfo(t),) + vis + ("", "", "", "9:16", "#111827", "#FFFFFF", gr.update(choices=_voice_choices(), value=""))
+            st = t["style"]
+            return (_tinfo(t),) + vis + (t["name"], t.get("description", ""), t["content"], st["aspect"], st["bgColor"], st["textColor"],
+                                         gr.update(choices=_voice_choices(st.get("voiceId", "")), value=st.get("voiceId", "")))
 
         skill_fields = [s_name, s_desc, s_content, s_aspect, s_bg, s_fg, s_voice]
-        s_pick.change(err(skill_form), s_pick, skill_fields)
+        s_pick.change(err(skill_form), s_pick, [s_info, g_tfiles, g_tform] + skill_fields)
 
         def refresh_skill_dds(value=None):
-            ch = _skill_choices()
-            return gr.update(choices=ch, value=value), gr.update(choices=ch), gr.update(choices=ch)
+            return (gr.update(choices=_template_choices(), value=value),
+                    gr.update(choices=[("(ไม่ใช้เทมเพลต)", "")] + _template_choices()),
+                    gr.update(choices=_skill_choices()))
+
+        tpl_dds = [s_pick, c_skill, e_skill]
 
         @err
         def save_s(sid, *vals):
-            s = save_skill(sid or None, *vals)
-            gr.Info("บันทึกสกิลแล้ว")
-            return refresh_skill_dds(s["id"])
+            t = get_template(sid) if sid else None
+            if t and t["type"] != "simple":
+                raise UserError("เทมเพลตแบบโฟลเดอร์แก้ในฟอร์มนี้ไม่ได้ ใช้ช่องเพิ่ม/แทนที่ไฟล์แทน")
+            s_ = save_skill(sid or None, *vals)
+            gr.Info("บันทึกเทมเพลตแล้ว")
+            return refresh_skill_dds(s_["id"])
 
-        s_save.click(save_s, [s_pick] + skill_fields, [s_pick, c_skill, e_skill])
+        s_save.click(save_s, [s_pick] + skill_fields, tpl_dds)
 
         @err
         def del_s(sid):
             if sid:
-                (SKILLS / f"{_safe(sid)}.json").unlink(missing_ok=True)
+                delete_template(sid)
+                gr.Info("ลบเทมเพลตแล้ว (โปรเจกต์ที่เคยทำไว้ยังอยู่)")
             return refresh_skill_dds("")
 
-        s_del.click(del_s, s_pick, [s_pick, c_skill, e_skill])
+        s_del.click(del_s, s_pick, tpl_dds)
+
+        @err
+        def dup_s(sid):
+            if not sid:
+                raise UserError("เลือกเทมเพลตก่อน")
+            t = duplicate_template(sid)
+            gr.Info("ทำสำเนาแล้ว")
+            return refresh_skill_dds(t["id"])
+
+        s_dup.click(dup_s, s_pick, tpl_dds)
+
+        @err
+        def export_s(sid):
+            if not sid:
+                raise UserError("เลือกเทมเพลตก่อน")
+            return gr.update(value=export_template(sid), visible=True)
+
+        s_export.click(export_s, s_pick, s_zip)
 
         @err
         def upload_s(files):
+            last = None
             for f in files or []:
-                import_skill_file(f if isinstance(f, str) else f.name)
-            gr.Info(f"เพิ่ม {len(files or [])} สกิลแล้ว")
-            return refresh_skill_dds() + (None,)
+                last = import_template_file(f if isinstance(f, str) else f.name)
+            gr.Info(f"เพิ่ม {len(files or [])} เทมเพลตแล้ว")
+            return refresh_skill_dds(last["id"] if last else None) + (None,)
 
-        s_files.upload(upload_s, s_files, [s_pick, c_skill, e_skill, s_files])
+        s_files.upload(upload_s, s_files, tpl_dds + [s_files])
+
+        @err
+        def add_files(sid, files):
+            if not sid:
+                raise UserError("เลือกเทมเพลตก่อน")
+            t = add_template_files(sid, [f if isinstance(f, str) else f.name for f in files or []])
+            gr.Info("เพิ่มไฟล์แล้ว")
+            return _tinfo(t), None
+
+        s_add.upload(add_files, [s_pick, s_add], [s_info, s_add])
+
+        # ===== events: drama
+        def _set_voice(pid_, cid, v):
+            p = get_project(pid_)
+            vs = p.setdefault("voices", {})
+            if cid == "_default":
+                vs["default"] = v or ""
+            else:
+                vs.setdefault("map", {})[cid] = v or ""
+            save_project(p)
+
+        def _set_bg(pid_, place_id, v):
+            p = get_project(pid_)
+            p.setdefault("bgs", {})[place_id] = v or "auto"
+            save_project(p)
+
+        def on_template(tid):
+            t = get_template(tid)
+            drama = bool(t and t["type"] == "drama")
+            info = ""
+            if t and t["type"] == "files":
+                info = "⚠️ เทมเพลตนี้ยังไม่มีตัวเชื่อมสำหรับเรนเดอร์ ส่งให้ผู้พัฒนาเพิ่มรองรับก่อน"
+            ch = _drama_choices(tid) if drama else []
+            return (info, gr.update(visible=not drama), gr.update(visible=drama),
+                    gr.update(choices=ch, value=ch[0][1] if ch else None))
+
+        c_skill.change(err(on_template), c_skill, [c_tinfo, g_simple, g_drama, d_proj])
+
+        def _drama_template(pid_):
+            p = get_project(pid_)
+            t = get_template(p.get("templateId"))
+            if not t or t["type"] != "drama":
+                raise UserError("ไม่พบเทมเพลตละครของซีรีส์นี้ (ถูกลบไปแล้ว?) เพิ่มเทมเพลตเดิมกลับเข้ามาแล้วเลือกใหม่")
+            return p, t, template_root(t)
+
+        def d_load(pid_, r):
+            if not pid_:
+                return "", "", gr.update(choices=[], value=None), "", r + 1, None
+            d = pdir(pid_)
+            eps = D.episodes(d)
+            series = (d / "series.json").read_text("utf-8") if (d / "series.json").exists() else ""
+            ep_txt = (d / eps[-1]).read_text("utf-8") if eps else ""
+            mp4 = sorted(d.glob("ep*.mp4"))
+            return (pid_, series, gr.update(choices=eps, value=eps[-1] if eps else None), ep_txt, r + 1,
+                    str(mp4[-1]) if mp4 else None)
+
+        d_proj.change(err(d_load), [d_proj, d_refresh], [d_pid, d_series, d_ep, d_ep_text, d_refresh, d_video])
+        d_ep.change(err(lambda pid_, e: (pdir(pid_) / e).read_text("utf-8") if pid_ and e else gr.update()),
+                    [d_pid, d_ep], d_ep_text)
+
+        def _file_text(f):
+            return Path(f if isinstance(f, str) else f.name).read_text("utf-8", errors="replace") if f else gr.update()
+
+        d_series_file.upload(_file_text, d_series_file, d_series)
+        d_ep_file.upload(_file_text, d_ep_file, d_ep_text)
+
+        @err
+        def save_series_(tid, pid_, text, r):
+            t = get_template(tid)
+            if not t or t["type"] != "drama":
+                raise UserError("เลือกเทมเพลตละครก่อน")
+            if not pid_:
+                pid_ = _new_id()
+                p = {"id": pid_, "type": "drama", "templateId": tid, "createdAt": _now(),
+                     "voices": {"engine": "edge", "map": {}, "default": ""}, "bgs": {}}
+            else:
+                p = get_project(pid_)
+            series = D.save_series(pdir(pid_), text)
+            p["title"] = series.get("series_title") or "ซีรีส์ใหม่"
+            save_project(p)
+            gr.Info("บันทึก series.json แล้ว")
+            return gr.update(choices=_drama_choices(tid), value=pid_), pid_, r + 1
+
+        d_save_series.click(save_series_, [c_skill, d_pid, d_series, d_refresh], [d_proj, d_pid, d_refresh])
+
+        @err
+        def save_ep_(pid_, text):
+            if not pid_:
+                raise UserError("บันทึก series.json ก่อน")
+            name, _ep = D.save_episode(pdir(pid_), text)
+            save_project(get_project(pid_))
+            gr.Info(f"บันทึก {name} แล้ว")
+            return gr.update(choices=D.episodes(pdir(pid_)), value=name)
+
+        d_save_ep.click(save_ep_, [d_pid, d_ep_text], d_ep)
+
+        @err
+        def check_(pid_, ep, sec):
+            if not pid_ or not ep:
+                raise UserError("เลือกตอนก่อน")
+            _p, _t, root = _drama_template(pid_)
+            ok, out = D.check(root, pdir(pid_), ep, int(sec or 0))
+            (gr.Info if ok else gr.Warning)("บทผ่าน ✅" if ok else "บทยังมี ERROR ต้องแก้ก่อนเรนเดอร์ (WARN แค่คำแนะนำ)")
+            return out
+
+        d_check.click(check_, [d_pid, d_ep, d_sec], d_check_out)
+
+        def _voice_cfg(p, engine, emodel):
+            v = p.get("voices", {})
+            return {"engine": engine, "model": emodel, "map": {k: x for k, x in v.get("map", {}).items() if x},
+                    "default": v.get("default", "")}
+
+        @err
+        def still_(pid_, ep, n, engine, emodel):
+            if not pid_ or not ep:
+                raise UserError("เลือกตอนก่อน")
+            p, _t, root = _drama_template(pid_)
+            D.apply_backgrounds(pdir(pid_), D.load(pdir(pid_), "series.json"), p.get("bgs", {}))
+            img = D.render(root, pdir(pid_), ep, _voice_cfg(p, engine, emodel), still=int(n or 1))
+            return str(img)
+
+        d_still.click(still_, [d_pid, d_ep, d_still_n, d_engine, d_emodel], d_img)
+
+        @err
+        def render_(pid_, ep, engine, emodel, force, progress=gr.Progress()):
+            if not pid_ or not ep:
+                raise UserError("เลือกตอนก่อน")
+            p, _t, root = _drama_template(pid_)
+            if engine == "eleven" and not os.environ.get("ELEVENLABS_API_KEY"):
+                raise UserError("ยังไม่ได้ใส่ ELEVENLABS_API_KEY")
+            ok, out = D.check(root, pdir(pid_), ep)
+            if not ok and not force:
+                raise UserError("บทยังไม่ผ่านการตรวจ กด ✅ ตรวจบท เพื่อดูว่าต้องแก้อะไร")
+            D.apply_backgrounds(pdir(pid_), D.load(pdir(pid_), "series.json"), p.get("bgs", {}))
+            log = []
+
+            def on_line(line):
+                log.append(line)
+                if m := re.match(r"shot (\d+)/(\d+)", line):
+                    progress(int(m.group(1)) / int(m.group(2)), desc=f"เรนเดอร์ช็อต {m.group(1)}/{m.group(2)}")
+                elif m := re.match(r"voice (\d+)/(\d+)", line):
+                    progress(0, desc=f"สร้างเสียง {m.group(1)}/{m.group(2)}")
+                elif line.startswith("voice:"):
+                    progress(0, desc="สร้างเสียงพากย์")
+
+            progress(0, desc="เริ่ม")
+            try:
+                mp4 = D.render(root, pdir(pid_), ep, _voice_cfg(p, engine, emodel), on_line=on_line)
+            except D.DramaError as e:
+                silent = sorted(pdir(pid_).glob("ep*.mp4"))
+                gr.Warning(str(e)[:300])
+                return (str(silent[-1]) if silent and "ไม่มีเสียง" in str(e) else None), "\n".join(log[-60:])
+            final = mp4.with_name(f"{mp4.stem}_{int(time.time())}.mp4")  # ชื่อใหม่ กัน browser cache
+            for old in pdir(pid_).glob(f"{mp4.stem}_*.mp4"):
+                old.unlink(missing_ok=True)
+            shutil.copy(mp4, final)
+            gr.Info("เรนเดอร์เสร็จ 🎉")
+            return str(final), "\n".join(log[-60:])
+
+        d_render.click(render_, [d_pid, d_ep, d_engine, d_emodel, d_force], [d_video, d_log])
+
+        @err
+        def d_del_(pid_, tid):
+            if pid_:
+                shutil.rmtree(pdir(pid_), ignore_errors=True)
+            ch = _drama_choices(tid)
+            return gr.update(choices=ch, value=None), "", "", ""
+
+        d_del.click(d_del_, [d_pid, c_skill], [d_proj, d_pid, d_series, d_ep_text])
 
         # ===== events: settings
         @err
@@ -751,6 +1209,13 @@ def build_app() -> gr.Blocks:
             return gr.update(choices=ch), gr.update(choices=ch)
 
         app.load(on_start, None, [e_voice, s_voice])
+        d_engine.change(err(lambda pid_, v: _set_engine(pid_, v)), [d_pid, d_engine], None)
+
+        def _set_engine(pid_, v):
+            if pid_:
+                p = get_project(pid_)
+                p.setdefault("voices", {})["engine"] = v
+                save_project(p)
 
     return app
 

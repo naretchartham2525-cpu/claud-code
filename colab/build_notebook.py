@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 
 HERE = Path(__file__).parent
-code = (HERE / "clip_studio.py").read_text("utf-8")
+MODULES = ["drama_adapter.py", "drama_runner.py", "clip_studio.py"]  # ฝังทุกไฟล์ลง notebook
 
 
 def md(src):
@@ -22,10 +22,11 @@ cells = [
        "สกิล → บท (Claude หรือวางเอง) → พากย์ ElevenLabs → คลิป MP4 ซับไทย\n\n"
        "**ครั้งแรก:** เมนูซ้าย 🔑 *Secrets* → เพิ่ม `ELEVENLABS_API_KEY` (และ `ANTHROPIC_API_KEY` ถ้าจะให้ AI คิดบท) → เปิด *Notebook access*\n\n"
        "**ทุกครั้ง:** Runtime → Run all แล้วกดลิงก์ `https://….gradio.live` ที่ขึ้นใน cell สุดท้าย\n\n"
-       "ข้อมูล (สกิล/โปรเจกต์/คลิป) เก็บใน Google Drive: `MyDrive/ClipStudio`"),
+       "ข้อมูล (เทมเพลต/โปรเจกต์/คลิป) เก็บใน Google Drive: `MyDrive/ClipStudio`\n\n"
+       "**เพิ่มเทมเพลต:** แท็บ *เทมเพลต* → ลากไฟล์ .zip ของสกิลมาวาง"),
     py("#@title 1. ติดตั้ง + เชื่อม Google Drive\n"
        "!apt-get -qq install -y fonts-thai-tlwg > /dev/null\n"
-       "!pip -q install gradio==6.32.0 anthropic==2.12.0 pythainlp\n"
+       "!pip -q install gradio==6.32.0 anthropic==2.12.0 pythainlp edge-tts uharfbuzz freetype-py opencv-python-headless\n"
        "import os\n"
        "from google.colab import drive, userdata\n"
        "drive.mount('/content/drive')\n"
@@ -36,7 +37,7 @@ cells = [
        "        print(k, '✅' if os.environ[k] else '❌ ว่าง')\n"
        "    except Exception:\n"
        "        print(k, '❌ ไม่มีใน Secrets (หรือยังไม่เปิด Notebook access)')"),
-    py("%%writefile /content/clip_studio.py\n" + code),
+] + [py(f"%%writefile /content/{m}\n" + (HERE / m).read_text("utf-8")) for m in MODULES] + [
     py("#@title 2. เปิดหน้าเว็บ (กดลิงก์ gradio.live ด้านล่าง)\n"
        "import sys, importlib\n"
        "sys.path.insert(0, '/content')\n"
